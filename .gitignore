@@ -2,3 +2,4 @@
 .smart-coding-cache
 logs
 .DS_Store
+ai.env

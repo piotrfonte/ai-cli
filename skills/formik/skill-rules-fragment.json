@@ -1,0 +1,50 @@
+{
+  "formik": {
+    "type": "domain",
+    "enforcement": "suggest",
+    "priority": "high",
+    "promptTriggers": {
+      "keywords": [
+        "formik",
+        "useFormik",
+        "Formik",
+        "Field",
+        "FieldArray",
+        "validationSchema",
+        "yup",
+        "Yup",
+        "handleSubmit",
+        "handleChange",
+        "handleBlur",
+        "setFieldValue",
+        "FormikProvider"
+      ],
+      "intentPatterns": [
+        "create.*form",
+        "add.*validation",
+        "form.*submit",
+        "validate.*field",
+        "build.*form",
+        "form.*with.*mui"
+      ]
+    },
+    "fileTriggers": {
+      "pathPatterns": [
+        "**/*Form.tsx",
+        "**/*Form.ts",
+        "**/forms/**",
+        "**/*Schema.ts",
+        "**/*Schema.tsx"
+      ],
+      "contentPatterns": [
+        "import.*formik",
+        "import.*yup",
+        "useFormik\\(",
+        "<Formik",
+        "<Field",
+        "<FieldArray",
+        "validationSchema"
+      ]
+    }
+  }
+}

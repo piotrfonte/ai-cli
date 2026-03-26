@@ -1,0 +1,55 @@
+{
+  "capacitor-app-store": {
+    "type": "domain",
+    "enforcement": "suggest",
+    "priority": "high",
+    "promptTriggers": {
+      "keywords": [
+        "app store",
+        "play store",
+        "publish app",
+        "submit app",
+        "app review",
+        "app rejection",
+        "app icon",
+        "screenshot",
+        "app store connect",
+        "play console",
+        "testflight",
+        "phased rollout",
+        "bundle id",
+        "version number",
+        "build number",
+        "info.plist",
+        "build.gradle",
+        "capacitor-assets"
+      ],
+      "intentPatterns": [
+        "publish.*app",
+        "submit.*store",
+        "upload.*app",
+        "app.*rejected",
+        "prepare.*release",
+        "generate.*icon",
+        "generate.*screenshot",
+        "version.*bump",
+        "build.*release"
+      ]
+    },
+    "fileTriggers": {
+      "pathPatterns": [
+        "**/ios/App/App/Info.plist",
+        "**/android/app/build.gradle",
+        "**/capacitor.config.ts",
+        "**/fastlane/**"
+      ],
+      "contentPatterns": [
+        "CFBundleVersion",
+        "CFBundleShortVersionString",
+        "versionCode",
+        "versionName",
+        "capacitor-assets"
+      ]
+    }
+  }
+}

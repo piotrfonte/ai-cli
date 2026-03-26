@@ -1,0 +1,56 @@
+{
+  "react-typescript": {
+    "type": "domain",
+    "enforcement": "suggest",
+    "priority": "high",
+    "promptTriggers": {
+      "keywords": [
+        "tanstack store",
+        "tanstack-store",
+        "@tanstack/store",
+        "@tanstack/react-store",
+        "useStore",
+        "state management",
+        "code quality",
+        "naming convention",
+        "KISS",
+        "DRY",
+        "YAGNI",
+        "immutability",
+        "error boundary",
+        "suspense",
+        "lazy",
+        "zod",
+        "validation"
+      ],
+      "intentPatterns": [
+        "create.*component",
+        "build.*react",
+        "write.*hook",
+        "custom.*hook",
+        "manage.*state",
+        "handle.*form",
+        "optimize.*performance",
+        "review.*code.*quality",
+        "naming.*convention",
+        "validate.*input",
+        "error.*handling"
+      ]
+    },
+    "fileTriggers": {
+      "pathPatterns": [
+        "**/hooks/**",
+        "**/components/**",
+        "**/store/**",
+        "**/stores/**"
+      ],
+      "contentPatterns": [
+        "import.*@tanstack/store",
+        "import.*@tanstack/react-store",
+        "useStore\\(",
+        "new Store\\(",
+        "createStore\\("
+      ]
+    }
+  }
+}

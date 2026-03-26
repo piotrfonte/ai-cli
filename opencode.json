@@ -1,0 +1,83 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "disabled_providers": ["opencode"],
+  "autoupdate": "notify",
+  "provider": {
+    "mlx": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "MLX Local",
+      "options": {
+        "baseURL": "http://127.0.0.1:10080/v1",
+        "apiKey": "mlx",
+        "logLevel": "ERROR",
+        "timeout": 600000,
+        "chunkTimeout": 600000
+      },
+      "models": {
+        "mlx-community/GLM-4.7-Flash-6bit": {
+          "name": "GLM 4.7 Flash",
+          "temperature": false,
+          "limit": {
+            "context": 43008,
+            "output": 8192
+          }
+        }
+      }
+    }
+  },
+  "model": "mlx/mlx-community/GLM-4.7-Flash-6bit",
+  "default_agent": "plan",
+  "watcher": {
+    "ignore": ["node_modules/**", "dist/**", "build/**", ".next/**", "*.log"]
+  },
+  "permission": {
+    "bash": {
+      "gitlab *": "ask",
+
+      "git status": "allow",
+      "git log *": "allow",
+      "git diff *": "allow",
+      "git show *": "allow",
+      "git blame *": "allow",
+      "git fetch *": "allow",
+      "git add *": "allow",
+      "git commit *": "allow",
+
+      "git merge *": "ask",
+      "git cherry-pick *": "ask",
+      "git tag *": "ask",
+      "git remote *": "ask",
+      "git stash *": "ask",
+
+      "git reset --hard *": "deny",
+      "git clean *": "deny",
+      "git checkout *": "deny",
+      "git restore *": "deny",
+      "git rebase *": "deny",
+      "git branch -D *": "deny",
+      "git push *": "deny",
+      "git filter-branch *": "deny",
+      "git gc *": "deny",
+      "git prune *": "deny"
+    },
+    "doom_loop": "allow"
+  },
+  "mcp": {
+    "smart-coding": {
+      "type": "local",
+      "enabled": true,
+      "command": ["smart-coding-mcp", "--workspace", "."],
+      "environment": {
+        "SMART_CODING_SMART_INDEXING": "true",
+        "SMART_CODING_WATCH_FILES": "true",
+        "SMART_CODING_EMBEDDING_MODEL": "Xenova/all-MiniLM-L6-v2"
+      },
+      "timeout": 60000
+    }
+  },
+  "compaction": {
+    "auto": true,
+    "prune": true,
+    "reserved": 8192
+  }
+}

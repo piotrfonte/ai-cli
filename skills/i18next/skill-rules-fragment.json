@@ -1,0 +1,48 @@
+{
+  "i18next": {
+    "type": "domain",
+    "enforcement": "suggest",
+    "priority": "high",
+    "promptTriggers": {
+      "keywords": [
+        "i18next",
+        "react-i18next",
+        "useTranslation",
+        "Trans",
+        "t()",
+        "changeLanguage",
+        "interpolation",
+        "pluralization",
+        "namespace",
+        "i18n",
+        "translation"
+      ],
+      "intentPatterns": [
+        "translate.*text",
+        "add.*translation",
+        "internationali",
+        "locali",
+        "add.*language",
+        "change.*language",
+        "i18n.*setup"
+      ]
+    },
+    "fileTriggers": {
+      "pathPatterns": [
+        "**/i18n/**",
+        "**/locales/**/*.json",
+        "**/translations/**",
+        "**/i18n.ts",
+        "**/i18n.tsx"
+      ],
+      "contentPatterns": [
+        "import.*i18next",
+        "import.*react-i18next",
+        "useTranslation\\(",
+        "i18next.init",
+        "i18n.changeLanguage",
+        "<Trans"
+      ]
+    }
+  }
+}

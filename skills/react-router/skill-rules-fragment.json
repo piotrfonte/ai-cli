@@ -1,0 +1,85 @@
+{
+  "react-router": {
+    "type": "domain",
+    "enforcement": "suggest",
+    "priority": "high",
+    "promptTriggers": {
+      "keywords": [
+        "react-router",
+        "react-router-dom",
+        "useNavigate",
+        "useParams",
+        "useSearchParams",
+        "useLocation",
+        "useLoaderData",
+        "useActionData",
+        "useFetcher",
+        "useNavigation",
+        "useOutletContext",
+        "Outlet",
+        "Route",
+        "Routes",
+        "BrowserRouter",
+        "RouterProvider",
+        "createBrowserRouter",
+        "createHashRouter",
+        "NavLink",
+        "Navigate",
+        "Link",
+        "Form",
+        "loader",
+        "action",
+        "errorElement",
+        "redirect",
+        "defer",
+        "Await"
+      ],
+      "intentPatterns": [
+        "add.*route",
+        "create.*router",
+        "setup.*routing",
+        "protect.*route",
+        "navigate.*to",
+        "add.*page",
+        "redirect.*after",
+        "lazy.*load.*route",
+        "code.*split.*route",
+        "nested.*route",
+        "auth.*guard",
+        "route.*param",
+        "search.*param",
+        "url.*param"
+      ]
+    },
+    "fileTriggers": {
+      "pathPatterns": [
+        "**/routes/**",
+        "**/router.ts",
+        "**/router.tsx",
+        "**/App.tsx",
+        "**/pages/**",
+        "**/layouts/**",
+        "**/routes.ts",
+        "**/routes.tsx"
+      ],
+      "contentPatterns": [
+        "import.*react-router-dom",
+        "from 'react-router-dom'",
+        "from \"react-router-dom\"",
+        "useNavigate\\(\\)",
+        "useParams\\(\\)",
+        "useSearchParams\\(\\)",
+        "useLocation\\(\\)",
+        "useLoaderData\\(\\)",
+        "<Route",
+        "<Routes",
+        "<BrowserRouter",
+        "<RouterProvider",
+        "createBrowserRouter\\(",
+        "<Outlet",
+        "<NavLink",
+        "<Navigate"
+      ]
+    }
+  }
+}

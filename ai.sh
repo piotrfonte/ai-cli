@@ -50,16 +50,23 @@ ai() {
   [[ -f "${ai_dir}/ai.env" ]] && source "${ai_dir}/ai.env"
   local ai_log_dir="${AI_LOG_DIR:-${ai_dir}/logs}"
   local ai_state_dir="${AI_STATE_DIR:-${HOME}/.local/state}"
-  local ai_port="${AI_PORT:-10080}"
+  # AI_BACKEND removed — server starts on demand
 
-  # ── Model definitions ────────────────────────────────────────────────
+  # ── MLX model config ──────────────────────────────────────────────────
   local model_id="mlx-community/GLM-4.7-Flash-6bit"
   local model_label="GLM-4.7 Flash 6-bit"
-  local model_max_tokens=16384
-  local server_port="${ai_port}"
+  local model_max_tokens=8192
+  local model_cache_limit=51539607552      # 48 GB Metal cache cap
+  local model_prompt_cache=8589934592      # 8 GB KV cache, slightly less aggressive
+  local model_prompt_cache_size=1
+  local server_port="${AI_PORT:-10080}"
   local state_file="${ai_state_dir}/mlx-lm-model"
   local pid_file="${ai_state_dir}/mlx-lm-server.pid"
   local startup_timeout=120
+
+  # ── OpenCode model selection ──────────────────────────────────────────
+  local oc_provider="mlx"
+  local oc_model="$model_id"
 
   # ── Helpers ──────────────────────────────────────────────────────────
   _info()  { printf "  ${c_cyan}▸${c_reset} %s\n" "$*"; }
@@ -73,10 +80,6 @@ ai() {
 
   _server_healthy() {
     curl -sf --max-time 2 "http://localhost:${server_port}/v1/models" >/dev/null 2>&1
-  }
-
-  _current_model() {
-    [[ -f "$state_file" ]] && cat "$state_file" 2>/dev/null
   }
 
   _kill_server() {
@@ -109,7 +112,7 @@ ai() {
         if [[ "$cmd_name" == *python* || "$cmd_name" == *mlx* ]]; then
           pids_to_kill="$pids_to_kill $pid"
         else
-          _warn "Skipping non-MLX process on port ${server_port}: ${cmd_name} (PID ${pid})"
+          _warn "Skipping unknown process on port ${server_port}: ${cmd_name} (PID ${pid})"
         fi
       done
     fi
@@ -143,17 +146,16 @@ ai() {
   _show_help() {
     echo ""
     _box_top
-    _box_line " ${c_bold}ai.sh${c_reset} — MLX Inference Server Launcher"
+    _box_line " ${c_bold}ai.sh${c_reset} — Local Inference Launcher"
     _box_bottom
     echo ""
     printf "  ${c_bold}Usage:${c_reset}  ai.sh [OPTIONS] [-- opencode-args...]\n"
     echo ""
     printf "  ${c_bold}Options:${c_reset}\n"
-    printf "    ${c_cyan}-k, --kill${c_reset}           Kill running server\n"
+    printf "    ${c_cyan}-k, --kill${c_reset}           Kill the MLX server\n"
     printf "    ${c_cyan}-h, --help${c_reset}           Show this help\n"
     echo ""
-    printf "  ${c_bold}Model:${c_reset}\n"
-    printf "    GLM-4.7 Flash 6-bit ${c_dim}(mlx-lm)${c_reset}\n"
+    printf "  ${c_bold}Model:${c_reset}  GLM-4.7 Flash 6-bit via mlx-lm\n"
     echo ""
   }
 
@@ -174,15 +176,17 @@ ai() {
     mkdir -p "$log_dir"
     local server_log="${log_dir}/mlx-lm-server-$(date +%Y%m%d-%H%M%S).log"
 
-    uv run --with mlx-lm python "${ai_dir}/mlx_server.py" \
+    MLX_CACHE_LIMIT="$model_cache_limit" \
+    uv run --no-project --with mlx-lm mlx_lm.server \
       --model "$model_id" \
       --port "$server_port" \
       --max-tokens "$model_max_tokens" \
       --temp 0.2 \
       --top-p 1.0 \
       --prefill-step-size 8192 \
-      --prompt-cache-bytes 2147483648 \
-      --prompt-cache-size 1 \
+      --prompt-cache-bytes "$model_prompt_cache" \
+      --prompt-cache-size "$model_prompt_cache_size" \
+      --decode-concurrency 1 \
       --prompt-concurrency 1 \
       --pipeline \
       >"$server_log" 2>&1 &
@@ -290,22 +294,13 @@ ai() {
 
   _check_deps || return 1
 
-  # ── Server state management ──────────────────────────────────────────
+  # ── Server management ────────────────────────────────────────────────
   local running_pid
   running_pid=$(_server_pid)
-  local current_model
-  current_model=$(_current_model)
 
   if [[ -n "$running_pid" ]]; then
     if _server_healthy; then
-      if [[ "$current_model" == "$model_id" ]]; then
-        _ok "Server already running with ${c_bold}${model_label}${c_reset} ${c_dim}(PID ${running_pid})${c_reset}"
-      else
-        _warn "Server running with different model: ${c_dim}${current_model}${c_reset}"
-        _info "Restarting with ${c_bold}${model_label}${c_reset}"
-        _kill_server
-        _start_server || return 1
-      fi
+      _ok "Server already running with ${c_bold}${model_label}${c_reset} ${c_dim}(PID ${running_pid})${c_reset}"
     else
       _warn "Port ${server_port} occupied but server is not healthy"
       _info "Killing stale process ${c_dim}(PID ${running_pid})${c_reset}"
@@ -326,11 +321,11 @@ ai() {
 
   # ── Launch opencode ──────────────────────────────────────────────────
   echo ""
-  _info "Launching ${c_bold}opencode${c_reset} with ${c_bold}mlx/${model_id}${c_reset}"
+  _info "Launching ${c_bold}opencode${c_reset} with ${c_bold}${oc_provider}/${oc_model}${c_reset}"
   echo ""
 
   cd "$caller_dir" || return 1
-  opencode -m "mlx/${model_id}" "${passthrough_args[@]}"
+  opencode -m "${oc_provider}/${oc_model}" "${passthrough_args[@]}"
   return $?
 }
 

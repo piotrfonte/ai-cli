@@ -1,0 +1,48 @@
+{
+  "capacitor-keyboard": {
+    "type": "domain",
+    "enforcement": "suggest",
+    "priority": "high",
+    "promptTriggers": {
+      "keywords": [
+        "keyboard",
+        "keyboard height",
+        "keyboard show",
+        "keyboard hide",
+        "keyboardWillShow",
+        "keyboardWillHide",
+        "input focus",
+        "scroll to input",
+        "accessory bar",
+        "safe area",
+        "windowSoftInputMode",
+        "iOS zoom",
+        "font-size 16"
+      ],
+      "intentPatterns": [
+        "keyboard.*overlap",
+        "keyboard.*cover",
+        "input.*hidden",
+        "scroll.*input",
+        "hide.*keyboard",
+        "keyboard.*height",
+        "chat.*input",
+        "fix.*keyboard"
+      ]
+    },
+    "fileTriggers": {
+      "pathPatterns": [
+        "**/capacitor.config.ts",
+        "**/android/app/src/main/AndroidManifest.xml"
+      ],
+      "contentPatterns": [
+        "import.*@capacitor/keyboard",
+        "Keyboard\\.addListener",
+        "keyboardWillShow",
+        "keyboardWillHide",
+        "keyboard-height",
+        "windowSoftInputMode"
+      ]
+    }
+  }
+}

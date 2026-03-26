@@ -1,0 +1,55 @@
+{
+  "capacitor-plugins": {
+    "type": "domain",
+    "enforcement": "suggest",
+    "priority": "high",
+    "promptTriggers": {
+      "keywords": [
+        "capacitor plugin",
+        "capgo",
+        "native functionality",
+        "native feature",
+        "biometric",
+        "face id",
+        "touch id",
+        "social login",
+        "native audio",
+        "camera preview",
+        "document scanner",
+        "background geolocation",
+        "in-app purchase",
+        "native purchases",
+        "live update",
+        "capacitor updater",
+        "ota update",
+        "bluetooth",
+        "nfc",
+        "keep awake",
+        "screen orientation",
+        "file picker",
+        "sqlite"
+      ],
+      "intentPatterns": [
+        "which plugin",
+        "add.*native",
+        "implement.*biometric",
+        "implement.*camera",
+        "implement.*payment",
+        "implement.*location",
+        "implement.*bluetooth",
+        "native.*audio",
+        "native.*video",
+        "cap sync"
+      ]
+    },
+    "fileTriggers": {
+      "pathPatterns": ["**/capacitor.config.ts"],
+      "contentPatterns": [
+        "import.*@capgo/",
+        "import.*@nicholasalx/",
+        "bunx cap sync",
+        "npx cap sync"
+      ]
+    }
+  }
+}
