@@ -53,20 +53,25 @@ ai() {
   # AI_BACKEND removed — server starts on demand
 
   # ── MLX model config ──────────────────────────────────────────────────
-  local model_id="mlx-community/GLM-4.7-Flash-6bit"
-  local model_label="GLM-4.7 Flash 6-bit"
-  local model_max_tokens=8192
-  local model_cache_limit=51539607552      # 48 GB Metal cache cap
-  local model_prompt_cache=8589934592      # 8 GB KV cache, slightly less aggressive
-  local model_prompt_cache_size=1
+  local model_id model_label model_max_tokens model_cache_limit
+  local model_prompt_cache model_prompt_cache_size model_context_limit
   local server_port="${AI_PORT:-10080}"
   local state_file="${ai_state_dir}/mlx-lm-model"
   local pid_file="${ai_state_dir}/mlx-lm-server.pid"
   local startup_timeout=120
 
-  # ── OpenCode model selection ──────────────────────────────────────────
+  # ── Model profiles ───────────────────────────────────────────────────
+  _model_glm() {
+    model_id="mlx-community/GLM-4.7-Flash-6bit"
+    model_label="GLM-4.7 Flash 6-bit"
+    model_max_tokens=8192
+    model_cache_limit=51539607552       # 48 GB Metal cache cap
+    model_prompt_cache=8589934592       # 8 GB KV cache
+    model_prompt_cache_size=1
+    model_context_limit=43008
+  }
+
   local oc_provider="mlx"
-  local oc_model="$model_id"
 
   # ── Helpers ──────────────────────────────────────────────────────────
   _info()  { printf "  ${c_cyan}▸${c_reset} %s\n" "$*"; }
@@ -155,7 +160,8 @@ ai() {
     printf "    ${c_cyan}-k, --kill${c_reset}           Kill the MLX server\n"
     printf "    ${c_cyan}-h, --help${c_reset}           Show this help\n"
     echo ""
-    printf "  ${c_bold}Model:${c_reset}  GLM-4.7 Flash 6-bit via mlx-lm\n"
+    printf "  ${c_bold}Model:${c_reset}\n"
+    printf "    ${c_dim}default${c_reset}              GLM-4.7 Flash 6-bit\n"
     echo ""
   }
 
@@ -287,6 +293,10 @@ ai() {
     esac
   done
 
+  # ── Select model profile ─────────────────────────────────────────────
+  _model_glm
+  local oc_model="$model_id"
+
   case "$action" in
     help) _show_help; return 0 ;;
     kill) _kill_server; return 0 ;;
@@ -300,7 +310,16 @@ ai() {
 
   if [[ -n "$running_pid" ]]; then
     if _server_healthy; then
-      _ok "Server already running with ${c_bold}${model_label}${c_reset} ${c_dim}(PID ${running_pid})${c_reset}"
+      local running_model
+      running_model=$(cat "$state_file" 2>/dev/null)
+      if [[ "$running_model" != "$model_id" ]]; then
+        _warn "Server running with different model"
+        _info "Switching to ${c_bold}${model_label}${c_reset}"
+        _kill_server
+        _start_server || return 1
+      else
+        _ok "Server already running with ${c_bold}${model_label}${c_reset} ${c_dim}(PID ${running_pid})${c_reset}"
+      fi
     else
       _warn "Port ${server_port} occupied but server is not healthy"
       _info "Killing stale process ${c_dim}(PID ${running_pid})${c_reset}"

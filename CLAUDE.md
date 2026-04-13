@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Is
 
-A Bash tool (`ai.sh`) that launches a local MLX inference server (GLM-4.7 Flash via mlx-lm) and connects [opencode](https://github.com/opencode-ai/opencode) to it. Designed for Apple Silicon Macs (M4 Max with 64GB RAM assumed).
+A Bash tool (`ai.sh`) that launches a local MLX inference server via mlx-lm and connects [opencode](https://github.com/opencode-ai/opencode) to it. Runs GLM-4.7 Flash. Designed for Apple Silicon Macs (M4 Max with 64GB RAM assumed).
 
 ## Usage
 
