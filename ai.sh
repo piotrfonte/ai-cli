@@ -71,6 +71,16 @@ ai() {
     model_context_limit=43008
   }
 
+  _model_qwen() {
+    model_id="mlx-community/Qwen3.6-35B-A3B-6bit"
+    model_label="Qwen 3.6 35B-A3B 6-bit"
+    model_max_tokens=8192
+    model_cache_limit=51539607552       # 48 GB Metal cache cap
+    model_prompt_cache=8589934592       # 8 GB KV cache
+    model_prompt_cache_size=1
+    model_context_limit=32768
+  }
+
   local oc_provider="mlx"
 
   # ── Helpers ──────────────────────────────────────────────────────────
@@ -157,11 +167,13 @@ ai() {
     printf "  ${c_bold}Usage:${c_reset}  ai.sh [OPTIONS] [-- opencode-args...]\n"
     echo ""
     printf "  ${c_bold}Options:${c_reset}\n"
+    printf "    ${c_cyan}-q, --qwen${c_reset}           Use Qwen 3.6 35B-A3B 6-bit\n"
     printf "    ${c_cyan}-k, --kill${c_reset}           Kill the MLX server\n"
     printf "    ${c_cyan}-h, --help${c_reset}           Show this help\n"
     echo ""
     printf "  ${c_bold}Model:${c_reset}\n"
     printf "    ${c_dim}default${c_reset}              GLM-4.7 Flash 6-bit\n"
+    printf "    ${c_dim}-q${c_reset}                   Qwen 3.6 35B-A3B 6-bit\n"
     echo ""
   }
 
@@ -276,6 +288,10 @@ ai() {
         action="kill"
         shift
         ;;
+      -q|--qwen)
+        action="qwen"
+        shift
+        ;;
       -h|--help)
         action="help"
         shift
@@ -294,7 +310,10 @@ ai() {
   done
 
   # ── Select model profile ─────────────────────────────────────────────
-  _model_glm
+  case "$action" in
+    qwen) _model_qwen ;;
+    *)    _model_glm ;;
+  esac
   local oc_model="$model_id"
 
   case "$action" in

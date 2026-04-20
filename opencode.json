@@ -21,6 +21,14 @@
             "context": 43008,
             "output": 8192
           }
+        },
+        "mlx-community/Qwen3.6-35B-A3B-6bit": {
+          "name": "Qwen 3.6 35B-A3B",
+          "temperature": false,
+          "limit": {
+            "context": 32768,
+            "output": 8192
+          }
         }
       }
     }
@@ -73,6 +81,17 @@
         "SMART_CODING_EMBEDDING_MODEL": "Xenova/all-MiniLM-L6-v2"
       },
       "timeout": 60000
+    },
+    "chrome-devtools": {
+      "type": "local",
+      "command": [
+        "npx",
+        "-y",
+        "chrome-devtools-mcp@latest",
+        "--autoConnect",
+        "--channel=stable"
+      ],
+      "enabled": true
     }
   },
   "compaction": {
