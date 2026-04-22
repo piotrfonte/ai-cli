@@ -26,14 +26,14 @@
           "name": "Qwen 3.6 35B-A3B",
           "temperature": false,
           "limit": {
-            "context": 32768,
-            "output": 8192
+            "context": 65536,
+            "output": 16384
           }
         }
       }
     }
   },
-  "model": "mlx/mlx-community/GLM-4.7-Flash-6bit",
+  "model": "mlx/mlx-community/Qwen3.6-35B-A3B-6bit",
   "default_agent": "plan",
   "watcher": {
     "ignore": ["node_modules/**", "dist/**", "build/**", ".next/**", "*.log"]

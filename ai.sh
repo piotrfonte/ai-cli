@@ -55,30 +55,38 @@ ai() {
   # ── MLX model config ──────────────────────────────────────────────────
   local model_id model_label model_max_tokens model_cache_limit
   local model_prompt_cache model_prompt_cache_size model_context_limit
+  local model_reasoning_parser model_default_backend model_tool_call_parser
   local server_port="${AI_PORT:-10080}"
   local state_file="${ai_state_dir}/mlx-lm-model"
   local pid_file="${ai_state_dir}/mlx-lm-server.pid"
   local startup_timeout=120
+  local backend=""   # set by --vllm/--mlx override, otherwise model default
 
   # ── Model profiles ───────────────────────────────────────────────────
   _model_glm() {
     model_id="mlx-community/GLM-4.7-Flash-6bit"
     model_label="GLM-4.7 Flash 6-bit"
-    model_max_tokens=8192
-    model_cache_limit=51539607552       # 48 GB Metal cache cap
-    model_prompt_cache=8589934592       # 8 GB KV cache
+    model_max_tokens=16384
+    model_cache_limit=34359738368       # 32 GB Metal cache cap (safe on 64 GB)
+    model_prompt_cache=15032385536      # 14 GB KV / prefix cache
     model_prompt_cache_size=1
-    model_context_limit=43008
+    model_context_limit=65536
+    model_reasoning_parser=""
+    model_tool_call_parser="glm47"
+    model_default_backend="mlx-lm"
   }
 
   _model_qwen() {
     model_id="mlx-community/Qwen3.6-35B-A3B-6bit"
     model_label="Qwen 3.6 35B-A3B 6-bit"
-    model_max_tokens=8192
-    model_cache_limit=51539607552       # 48 GB Metal cache cap
-    model_prompt_cache=8589934592       # 8 GB KV cache
+    model_max_tokens=16384
+    model_cache_limit=34359738368       # 32 GB Metal cache cap (safe on 64 GB)
+    model_prompt_cache=15032385536      # 14 GB KV / prefix cache
     model_prompt_cache_size=1
-    model_context_limit=32768
+    model_context_limit=65536
+    model_reasoning_parser="qwen3"
+    model_tool_call_parser="hermes"
+    model_default_backend="vllm-mlx"
   }
 
   local oc_provider="mlx"
@@ -167,27 +175,45 @@ ai() {
     printf "  ${c_bold}Usage:${c_reset}  ai.sh [OPTIONS] [-- opencode-args...]\n"
     echo ""
     printf "  ${c_bold}Options:${c_reset}\n"
-    printf "    ${c_cyan}-q, --qwen${c_reset}           Use Qwen 3.6 35B-A3B 6-bit\n"
+    printf "    ${c_cyan}-glm, --glm${c_reset}          Use GLM-4.7 Flash 6-bit\n"
+    printf "    ${c_cyan}-vllm, --vllm${c_reset}        Force vllm-mlx backend\n"
+    printf "    ${c_cyan}-mlx, --mlx${c_reset}          Force mlx-lm backend\n"
     printf "    ${c_cyan}-k, --kill${c_reset}           Kill the MLX server\n"
     printf "    ${c_cyan}-h, --help${c_reset}           Show this help\n"
     echo ""
     printf "  ${c_bold}Model:${c_reset}\n"
-    printf "    ${c_dim}default${c_reset}              GLM-4.7 Flash 6-bit\n"
-    printf "    ${c_dim}-q${c_reset}                   Qwen 3.6 35B-A3B 6-bit\n"
+    printf "    ${c_dim}default${c_reset}              Qwen 3.6 35B-A3B 6-bit (vllm-mlx)\n"
+    printf "    ${c_dim}-glm${c_reset}                 GLM-4.7 Flash 6-bit (mlx-lm)\n"
+    echo ""
+    printf "  ${c_bold}Backend (per model default; override with -vllm/-mlx):${c_reset}\n"
+    printf "    ${c_dim}Qwen${c_reset}                 vllm-mlx (prefix + paged KV cache)\n"
+    printf "    ${c_dim}GLM${c_reset}                  mlx-lm (stable, single-slot)\n"
     echo ""
   }
 
   # ── Start inference server ────────────────────────────────────────────
   _start_server() {
+    case "$backend" in
+      vllm-mlx) _start_server_vllm ;;
+      *)        _start_server_mlx ;;
+    esac
+  }
+
+  _start_banner() {
+    local label="$1"
     echo ""
     _box_top
-    _box_line " ${c_bold}Starting mlx-lm Server${c_reset}"
+    _box_line " ${c_bold}Starting ${label} Server${c_reset}"
     _box_mid
     _box_line " ${c_bold}Model:${c_reset} ${model_label}"
     _box_line " ${c_dim}${model_id}${c_reset}"
     _box_line " ${c_bold}Port:${c_reset}  ${server_port}"
     _box_bottom
     echo ""
+  }
+
+  _start_server_mlx() {
+    _start_banner "mlx-lm"
 
     mkdir -p "$(dirname "$state_file")"
     local log_dir="${ai_log_dir}"
@@ -207,6 +233,42 @@ ai() {
       --decode-concurrency 1 \
       --prompt-concurrency 1 \
       --pipeline \
+      >"$server_log" 2>&1 &
+    local server_pid=$!
+    echo "$server_pid" > "$pid_file"
+
+    _wait_for_server "$server_pid" "$server_log"
+  }
+
+  _start_server_vllm() {
+    _start_banner "vllm-mlx"
+
+    mkdir -p "$(dirname "$state_file")"
+    local log_dir="${ai_log_dir}"
+    mkdir -p "$log_dir"
+    local server_log="${log_dir}/vllm-mlx-server-$(date +%Y%m%d-%H%M%S).log"
+
+    local -a extra_args=()
+    if [[ -n "$model_reasoning_parser" ]]; then
+      extra_args+=(--reasoning-parser "$model_reasoning_parser")
+    fi
+    if [[ -n "$model_tool_call_parser" ]]; then
+      extra_args+=(--tool-call-parser "$model_tool_call_parser")
+    fi
+
+    local cache_mb=$(( model_prompt_cache / 1024 / 1024 ))
+
+    MLX_CACHE_LIMIT="$model_cache_limit" \
+    uvx --from git+https://github.com/waybarrios/vllm-mlx.git \
+      vllm-mlx serve "$model_id" \
+      --port "$server_port" \
+      --max-tokens "$model_max_tokens" \
+      --cache-memory-mb "$cache_mb" \
+      --use-paged-cache \
+      --max-cache-blocks 3000 \
+      --max-num-seqs 1 \
+      --enable-auto-tool-choice \
+      "${extra_args[@]}" \
       >"$server_log" 2>&1 &
     local server_pid=$!
     echo "$server_pid" > "$pid_file"
@@ -242,7 +304,7 @@ ai() {
       if _server_healthy; then
         printf "\r                                                    \r"
         _ok "Server ready ${c_dim}(PID ${server_pid}, took ${elapsed}s)${c_reset}"
-        echo "$model_id" > "$state_file"
+        printf "%s\n%s\n" "$backend" "$model_id" > "$state_file"
         trap - INT
         return 0
       fi
@@ -288,8 +350,16 @@ ai() {
         action="kill"
         shift
         ;;
-      -q|--qwen)
-        action="qwen"
+      -glm|--glm)
+        action="glm"
+        shift
+        ;;
+      -vllm|--vllm)
+        backend="vllm-mlx"
+        shift
+        ;;
+      -mlx|--mlx)
+        backend="mlx-lm"
         shift
         ;;
       -h|--help)
@@ -311,9 +381,11 @@ ai() {
 
   # ── Select model profile ─────────────────────────────────────────────
   case "$action" in
-    qwen) _model_qwen ;;
-    *)    _model_glm ;;
+    glm) _model_glm ;;
+    *)   _model_qwen ;;
   esac
+  # Apply per-model default backend unless the caller overrode with --vllm/--mlx
+  [[ -z "$backend" ]] && backend="$model_default_backend"
   local oc_model="$model_id"
 
   case "$action" in
@@ -329,15 +401,22 @@ ai() {
 
   if [[ -n "$running_pid" ]]; then
     if _server_healthy; then
-      local running_model
-      running_model=$(cat "$state_file" 2>/dev/null)
-      if [[ "$running_model" != "$model_id" ]]; then
-        _warn "Server running with different model"
-        _info "Switching to ${c_bold}${model_label}${c_reset}"
+      local running_backend="" running_model=""
+      if [[ -f "$state_file" ]]; then
+        { IFS= read -r running_backend; IFS= read -r running_model; } < "$state_file"
+      fi
+      # Legacy state file (single line with model id) — treat as mlx-lm.
+      if [[ -z "$running_model" && -n "$running_backend" ]]; then
+        running_model="$running_backend"
+        running_backend="mlx-lm"
+      fi
+      if [[ "$running_backend" != "$backend" || "$running_model" != "$model_id" ]]; then
+        _warn "Server running with different backend/model (${running_backend:-unknown}/${running_model:-unknown})"
+        _info "Switching to ${c_bold}${backend}${c_reset} / ${c_bold}${model_label}${c_reset}"
         _kill_server
         _start_server || return 1
       else
-        _ok "Server already running with ${c_bold}${model_label}${c_reset} ${c_dim}(PID ${running_pid})${c_reset}"
+        _ok "Server already running: ${c_bold}${backend}${c_reset} / ${c_bold}${model_label}${c_reset} ${c_dim}(PID ${running_pid})${c_reset}"
       fi
     else
       _warn "Port ${server_port} occupied but server is not healthy"
@@ -359,7 +438,7 @@ ai() {
 
   # ── Launch opencode ──────────────────────────────────────────────────
   echo ""
-  _info "Launching ${c_bold}opencode${c_reset} with ${c_bold}${oc_provider}/${oc_model}${c_reset}"
+  _info "Launching ${c_bold}opencode${c_reset} with ${c_bold}${oc_provider}/${oc_model}${c_reset} ${c_dim}(backend: ${backend})${c_reset}"
   echo ""
 
   cd "$caller_dir" || return 1
