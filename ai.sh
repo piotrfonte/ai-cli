@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# ai.sh — MLX Inference Server Launcher for OpenCode
-# Usage: bash ai.sh [OPTIONS] [-- opencode-args...]
-#   or:  source ai.sh && ai [OPTIONS] [-- opencode-args...]
+# ai.sh — MLX Inference Server Launcher
+# Usage: bash ai.sh [OPTIONS] [-- frontend-args...]
+#   or:  source ai.sh && ai [OPTIONS] [-- frontend-args...]
 
 ai() {
   local caller_dir="$PWD"
@@ -54,7 +54,7 @@ ai() {
   # ── MLX model config ──────────────────────────────────────────────────
   local model_id model_label model_max_tokens model_cache_limit
   local model_prompt_cache model_prompt_cache_size model_context_limit
-  local server_port="${AI_PORT:-10080}"
+  local server_port="${AI_PORT:-10081}"
   local state_file="${ai_state_dir}/mlx-lm-model"
   local pid_file="${ai_state_dir}/mlx-lm-server.pid"
   local startup_timeout=120
@@ -63,20 +63,20 @@ ai() {
   _model_glm() {
     model_id="mlx-community/GLM-4.7-Flash-6bit"
     model_label="GLM-4.7 Flash 6-bit"
-    model_max_tokens=16384
-    model_cache_limit=34359738368       # 32 GB Metal cache cap (safe on 64 GB)
-    model_prompt_cache=15032385536      # 14 GB KV / prefix cache
-    model_prompt_cache_size=1
+    model_max_tokens=8192
+    model_cache_limit=28991029248       # 27 GB Metal cache cap
+    model_prompt_cache=8589934592       # 8 GB KV / prefix cache
+    model_prompt_cache_size=2
     model_context_limit=65536
   }
 
   _model_qwen() {
     model_id="mlx-community/Qwen3.6-35B-A3B-6bit"
     model_label="Qwen 3.6 35B-A3B 6-bit"
-    model_max_tokens=16384
-    model_cache_limit=34359738368       # 32 GB Metal cache cap (safe on 64 GB)
-    model_prompt_cache=15032385536      # 14 GB KV / prefix cache
-    model_prompt_cache_size=1
+    model_max_tokens=8192
+    model_cache_limit=28991029248       # 27 GB Metal cache cap
+    model_prompt_cache=8589934592       # 8 GB KV / prefix cache
+    model_prompt_cache_size=2
     model_context_limit=65536
   }
 
@@ -163,12 +163,13 @@ ai() {
     _box_line " ${c_bold}ai.sh${c_reset} — Local Inference Launcher"
     _box_bottom
     echo ""
-    printf "  ${c_bold}Usage:${c_reset}  ai.sh [OPTIONS] [-- opencode-args...]\n"
+    printf "  ${c_bold}Usage:${c_reset}  ai.sh [OPTIONS] [-- frontend-args...]\n"
     echo ""
     printf "  ${c_bold}Options:${c_reset}\n"
     printf "    ${c_cyan}-glm, --glm${c_reset}          Use GLM-4.7 Flash 6-bit\n"
-    printf "    ${c_cyan}-k, --kill${c_reset}           Kill the MLX server\n"
-    printf "    ${c_cyan}-h, --help${c_reset}           Show this help\n"
+    printf "    ${c_cyan}-pi,  --pi${c_reset}           Use pi instead of opencode\n"
+    printf "    ${c_cyan}-k,   --kill${c_reset}         Kill the MLX server\n"
+    printf "    ${c_cyan}-h,   --help${c_reset}         Show this help\n"
     echo ""
     printf "  ${c_bold}Model:${c_reset}\n"
     printf "    ${c_dim}default${c_reset}              Qwen 3.6 35B-A3B 6-bit\n"
@@ -191,6 +192,7 @@ ai() {
     mkdir -p "$(dirname "$state_file")"
     local log_dir="${ai_log_dir}"
     mkdir -p "$log_dir"
+    find "$log_dir" -maxdepth 1 -type f -name '*.log' -mtime +14 -delete 2>/dev/null
     local server_log="${log_dir}/mlx-lm-server-$(date +%Y%m%d-%H%M%S).log"
 
     MLX_CACHE_LIMIT="$model_cache_limit" \
@@ -205,7 +207,6 @@ ai() {
       --prompt-cache-size "$model_prompt_cache_size" \
       --decode-concurrency 1 \
       --prompt-concurrency 1 \
-      --pipeline \
       >"$server_log" 2>&1 &
     local server_pid=$!
     echo "$server_pid" > "$pid_file"
@@ -261,6 +262,23 @@ ai() {
     return 1
   }
 
+  # ── Reap orphaned MCP children from prior sessions ───────────────────
+  _reap_orphan_mcps() {
+    local reaped=0
+    local patterns=("smart-coding-mcp --workspace" "chrome-devtools-mcp")
+    for pat in "${patterns[@]}"; do
+      while IFS= read -r mcp_pid; do
+        [[ -z "$mcp_pid" ]] && continue
+        local ppid
+        ppid=$(ps -o ppid= -p "$mcp_pid" 2>/dev/null | tr -d ' ')
+        if [[ "$ppid" == "1" ]]; then
+          kill "$mcp_pid" 2>/dev/null && (( reaped++ ))
+        fi
+      done < <(pgrep -f "$pat" 2>/dev/null)
+    done
+    (( reaped > 0 )) && _info "Reaped ${reaped} orphaned MCP process(es)"
+  }
+
   # ── Dependency checks ────────────────────────────────────────────────
   _check_deps() {
     local missing=0
@@ -269,16 +287,26 @@ ai() {
       _info "Install: ${c_dim}curl -LsSf https://astral.sh/uv/install.sh | sh${c_reset}"
       missing=1
     fi
-    if ! command -v opencode >/dev/null 2>&1; then
-      _err "Missing dependency: ${c_bold}opencode${c_reset}"
-      _info "Install: ${c_dim}go install github.com/opencode-ai/opencode@latest${c_reset}"
-      missing=1
+    if [[ "$frontend" == "pi" ]]; then
+      if ! command -v pi >/dev/null 2>&1; then
+        _err "Missing dependency: ${c_bold}pi${c_reset}"
+        _info "Install: ${c_dim}npm i -g @mariozechner/pi-coding-agent${c_reset}"
+        missing=1
+      fi
+    else
+      if ! command -v opencode >/dev/null 2>&1; then
+        _err "Missing dependency: ${c_bold}opencode${c_reset}"
+        _info "Install: ${c_dim}go install github.com/opencode-ai/opencode@latest${c_reset}"
+        missing=1
+      fi
     fi
     return $missing
   }
 
   # ── Main logic ───────────────────────────────────────────────────────
-  local action=""
+  local action=""               # "" | "kill" | "help"
+  local frontend="opencode"     # "pi" | "opencode"
+  local model_choice="qwen"     # "qwen" | "glm"
   local -a passthrough_args=()
 
   while [[ $# -gt 0 ]]; do
@@ -287,12 +315,16 @@ ai() {
         action="kill"
         shift
         ;;
-      -glm|--glm)
-        action="glm"
-        shift
-        ;;
       -h|--help)
         action="help"
+        shift
+        ;;
+      -glm|--glm)
+        model_choice="glm"
+        shift
+        ;;
+      -pi|--pi)
+        frontend="pi"
         shift
         ;;
       --)
@@ -309,7 +341,7 @@ ai() {
   done
 
   # ── Select model profile ─────────────────────────────────────────────
-  case "$action" in
+  case "$model_choice" in
     glm) _model_glm ;;
     *)   _model_qwen ;;
   esac
@@ -321,6 +353,8 @@ ai() {
   esac
 
   _check_deps || return 1
+
+  _reap_orphan_mcps
 
   # ── Server management ────────────────────────────────────────────────
   local running_pid
@@ -358,13 +392,19 @@ ai() {
     _info "Install: ${c_dim}npm install -g smart-coding-mcp${c_reset}"
   fi
 
-  # ── Launch opencode ──────────────────────────────────────────────────
+  # ── Launch frontend ──────────────────────────────────────────────────
   echo ""
-  _info "Launching ${c_bold}opencode${c_reset} with ${c_bold}${oc_provider}/${oc_model}${c_reset}"
-  echo ""
-
   cd "$caller_dir" || return 1
-  opencode -m "${oc_provider}/${oc_model}" "${passthrough_args[@]}"
+
+  if [[ "$frontend" == "pi" ]]; then
+    _info "Launching ${c_bold}pi${c_reset} with ${c_bold}mlx/${oc_model}${c_reset}"
+    echo ""
+    pi --provider mlx --model "$oc_model" "${passthrough_args[@]}"
+  else
+    _info "Launching ${c_bold}opencode${c_reset} with ${c_bold}${oc_provider}/${oc_model}${c_reset}"
+    echo ""
+    opencode -m "${oc_provider}/${oc_model}" "${passthrough_args[@]}"
+  fi
   return $?
 }
 

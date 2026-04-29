@@ -7,7 +7,7 @@
       "npm": "@ai-sdk/openai-compatible",
       "name": "MLX Local",
       "options": {
-        "baseURL": "http://127.0.0.1:10080/v1",
+        "baseURL": "http://127.0.0.1:10081/v1",
         "apiKey": "mlx",
         "logLevel": "ERROR",
         "timeout": 600000,
@@ -27,14 +27,14 @@
           "temperature": false,
           "limit": {
             "context": 65536,
-            "output": 16384
+            "output": 8192
           }
         }
       }
     }
   },
   "model": "mlx/mlx-community/Qwen3.6-35B-A3B-6bit",
-  "default_agent": "plan",
+  "default_agent": "build",
   "watcher": {
     "ignore": ["node_modules/**", "dist/**", "build/**", ".next/**", "*.log"]
   },
@@ -91,7 +91,7 @@
         "--autoConnect",
         "--channel=stable"
       ],
-      "enabled": true
+      "enabled": false
     }
   },
   "compaction": {
