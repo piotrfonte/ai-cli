@@ -59,6 +59,14 @@ ai() {
   local pid_file="${ai_state_dir}/mlx-lm-server.pid"
   local startup_timeout=120
 
+  # ── OOZ remote endpoint config (used by -ooz; set in ai.env) ─────────
+  local ooz_ssh_host="${OOZ_SSH_HOST:-}"
+  local ooz_ssh_user="${OOZ_SSH_USER:-}"
+  local ooz_ssh_port="${OOZ_SSH_PORT:-22}"
+  local ooz_local_port="${OOZ_LOCAL_PORT:-8089}"
+  local ooz_remote="${OOZ_REMOTE:-127.0.0.1:8080}"
+  local ooz_model="${OOZ_MODEL:-}"   # pin model id; empty → auto-detect
+
   # ── Model profile ────────────────────────────────────────────────────
   _model_qwen() {
     model_id="mlx-community/Qwen3.6-35B-A3B-6bit"
@@ -146,6 +154,85 @@ ai() {
     fi
   }
 
+  # ── OOZ SSH tunnel lifecycle ─────────────────────────────────────────
+  _tunnel_healthy() {
+    curl -sf --max-time 2 "http://127.0.0.1:${ooz_local_port}/v1/models" >/dev/null 2>&1
+  }
+
+  _kill_tunnel() {
+    local port_pids
+    port_pids=$(lsof -ti "tcp:${ooz_local_port}" -sTCP:LISTEN 2>/dev/null)
+    local killed=""
+    for pid in $port_pids; do
+      local cmd_name
+      cmd_name=$(ps -o comm= -p "$pid" 2>/dev/null | tr '[:upper:]' '[:lower:]')
+      if [[ "$cmd_name" == *ssh* ]]; then
+        kill "$pid" 2>/dev/null && killed="$killed $pid"
+      fi
+    done
+    [[ -n "$killed" ]] && _ok "Tunnel closed${c_dim} (PID${killed})${c_reset}"
+  }
+
+  _start_tunnel() {
+    if [[ -z "$ooz_ssh_host" || -z "$ooz_ssh_user" ]]; then
+      _err "OOZ endpoint not configured"
+      _info "Set ${c_bold}OOZ_SSH_HOST${c_reset} and ${c_bold}OOZ_SSH_USER${c_reset} in ${c_dim}${ai_dir}/ai.env${c_reset}"
+      return 1
+    fi
+
+    if _tunnel_healthy; then
+      _ok "Tunnel already up${c_dim} (127.0.0.1:${ooz_local_port})${c_reset}"
+      return 0
+    fi
+
+    echo ""
+    _box_top
+    _box_line " ${c_bold}Opening SSH Tunnel${c_reset}"
+    _box_mid
+    _box_line " ${c_bold}Remote:${c_reset} ${ooz_ssh_user}@${ooz_ssh_host}:${ooz_ssh_port}"
+    _box_line " ${c_bold}Forward:${c_reset} 127.0.0.1:${ooz_local_port} → ${ooz_remote}"
+    _box_bottom
+    echo ""
+
+    # -f backgrounds after auth + forward setup (so a passphrase prompt
+    # still works); ExitOnForwardFailure makes a bind failure fatal.
+    ssh -f -N -C \
+      -o ExitOnForwardFailure=yes \
+      -L "${ooz_local_port}:${ooz_remote}" \
+      -p "${ooz_ssh_port}" \
+      "${ooz_ssh_user}@${ooz_ssh_host}" || {
+      _err "SSH tunnel failed to establish"
+      return 1
+    }
+
+    local elapsed=0
+    local frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
+    local fi=0
+    while (( elapsed < 30 )); do
+      if _tunnel_healthy; then
+        printf "\r                                                    \r"
+        _ok "Tunnel ready${c_dim} (127.0.0.1:${ooz_local_port}, took ${elapsed}s)${c_reset}"
+        return 0
+      fi
+      printf "\r  ${c_cyan}${frames[$fi]}${c_reset} Waiting for endpoint... ${c_dim}(${elapsed}s)${c_reset}"
+      fi=$(( (fi + 1) % ${#frames[@]} ))
+      sleep 1
+      (( elapsed++ ))
+    done
+
+    printf "\r                                                    \r"
+    _err "Endpoint at 127.0.0.1:${ooz_local_port} did not respond within 30s"
+    _kill_tunnel
+    return 1
+  }
+
+  _discover_ooz_model() {
+    curl -sf --max-time 5 "http://127.0.0.1:${ooz_local_port}/v1/models" 2>/dev/null \
+      | tr ',{}' '\n\n\n' \
+      | grep -m1 '"id"' \
+      | sed -E 's/.*"id"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/'
+  }
+
   # ── Show help ────────────────────────────────────────────────────────
   _show_help() {
     echo ""
@@ -156,11 +243,13 @@ ai() {
     printf "  ${c_bold}Usage:${c_reset}  ai.sh [OPTIONS] [-- frontend-args...]\n"
     echo ""
     printf "  ${c_bold}Options:${c_reset}\n"
-    printf "    ${c_cyan}-k,   --kill${c_reset}         Kill the MLX server\n"
+    printf "    ${c_cyan}-ooz, --ooz${c_reset}          Tunnel to the OOZ remote endpoint\n"
+    printf "    ${c_cyan}-k,   --kill${c_reset}         Kill the MLX server and OOZ tunnel\n"
     printf "    ${c_cyan}-h,   --help${c_reset}         Show this help\n"
     echo ""
     printf "  ${c_bold}Model:${c_reset}\n"
-    printf "    ${c_dim}Qwen 3.6 35B-A3B 6-bit${c_reset}\n"
+    printf "    ${c_dim}Qwen 3.6 35B-A3B 6-bit (local)${c_reset}\n"
+    printf "    ${c_dim}remote model via -ooz (auto-detected)${c_reset}\n"
     echo ""
   }
 
@@ -266,17 +355,22 @@ ai() {
     (( reaped > 0 )) && _info "Reaped ${reaped} orphaned MCP process(es)"
   }
 
-  # ── Dependency checks ────────────────────────────────────────────────
+  # ── Dependency checks (mode-aware) ───────────────────────────────────
   _check_deps() {
     local missing=0
-    if ! command -v uv >/dev/null 2>&1; then
-      _err "Missing dependency: ${c_bold}uv${c_reset}"
-      _info "Install: ${c_dim}curl -LsSf https://astral.sh/uv/install.sh | sh${c_reset}"
-      missing=1
-    fi
     if ! command -v opencode >/dev/null 2>&1; then
       _err "Missing dependency: ${c_bold}opencode${c_reset}"
       _info "Install: ${c_dim}go install github.com/opencode-ai/opencode@latest${c_reset}"
+      missing=1
+    fi
+    if [[ "$mode" == "ooz" ]]; then
+      if ! command -v ssh >/dev/null 2>&1; then
+        _err "Missing dependency: ${c_bold}ssh${c_reset}"
+        missing=1
+      fi
+    elif ! command -v uv >/dev/null 2>&1; then
+      _err "Missing dependency: ${c_bold}uv${c_reset}"
+      _info "Install: ${c_dim}curl -LsSf https://astral.sh/uv/install.sh | sh${c_reset}"
       missing=1
     fi
     return $missing
@@ -284,6 +378,7 @@ ai() {
 
   # ── Main logic ───────────────────────────────────────────────────────
   local action=""               # "" | "kill" | "help"
+  local mode="local"            # "local" | "ooz"
   local -a passthrough_args=()
 
   while [[ $# -gt 0 ]]; do
@@ -294,6 +389,10 @@ ai() {
         ;;
       -h|--help)
         action="help"
+        shift
+        ;;
+      -ooz|--ooz)
+        mode="ooz"
         shift
         ;;
       --)
@@ -309,45 +408,62 @@ ai() {
     esac
   done
 
-  # ── Select model profile ─────────────────────────────────────────────
+  # ── Select model profile (local default) ─────────────────────────────
   _model_qwen
   local oc_model="$model_id"
 
   case "$action" in
     help) _show_help; return 0 ;;
-    kill) _kill_server; return 0 ;;
+    kill) _kill_server; _kill_tunnel; return 0 ;;
   esac
 
   _check_deps || return 1
 
-  _reap_orphan_mcps
+  if [[ "$mode" == "ooz" ]]; then
+    # ── OOZ remote endpoint via SSH tunnel ─────────────────────────────
+    _start_tunnel || return 1
+    # Prefer the pinned OOZ_MODEL (matches opencode.json); else auto-detect.
+    oc_model="$ooz_model"
+    if [[ -z "$oc_model" ]]; then
+      oc_model=$(_discover_ooz_model)
+    fi
+    if [[ -z "$oc_model" ]]; then
+      _err "Could not detect a model from the OOZ endpoint"
+      _info "Set ${c_bold}OOZ_MODEL${c_reset} in ai.env, or check ${c_dim}http://127.0.0.1:${ooz_local_port}/v1/models${c_reset}"
+      return 1
+    fi
+    oc_provider="ooz"
+    _ok "Remote model: ${c_bold}${oc_model}${c_reset}"
+  else
+    _reap_orphan_mcps
 
-  # ── Server management ────────────────────────────────────────────────
-  local running_pid
-  running_pid=$(_server_pid)
+    # ── Server management ──────────────────────────────────────────────
+    local running_pid
+    running_pid=$(_server_pid)
 
-  if [[ -n "$running_pid" ]]; then
-    if _server_healthy; then
-      local running_model=""
-      if [[ -f "$state_file" ]]; then
-        IFS= read -r running_model < "$state_file"
-      fi
-      if [[ "$running_model" != "$model_id" ]]; then
-        _warn "Server running with different model (${running_model:-unknown})"
-        _info "Switching to ${c_bold}${model_label}${c_reset}"
+    if [[ -n "$running_pid" ]]; then
+      if _server_healthy; then
+        local running_model=""
+        if [[ -f "$state_file" ]]; then
+          IFS= read -r running_model < "$state_file"
+        fi
+        if [[ "$running_model" != "$model_id" ]]; then
+          _warn "Server running with different model (${running_model:-unknown})"
+          _info "Switching to ${c_bold}${model_label}${c_reset}"
+          _kill_server
+          _start_server || return 1
+        else
+          _ok "Server already running: ${c_bold}${model_label}${c_reset} ${c_dim}(PID ${running_pid})${c_reset}"
+        fi
+      else
+        _warn "Port ${server_port} occupied but server is not healthy"
+        _info "Killing stale process ${c_dim}(PID ${running_pid})${c_reset}"
         _kill_server
         _start_server || return 1
-      else
-        _ok "Server already running: ${c_bold}${model_label}${c_reset} ${c_dim}(PID ${running_pid})${c_reset}"
       fi
     else
-      _warn "Port ${server_port} occupied but server is not healthy"
-      _info "Killing stale process ${c_dim}(PID ${running_pid})${c_reset}"
-      _kill_server
       _start_server || return 1
     fi
-  else
-    _start_server || return 1
   fi
 
   # ── RAG check ──────────────────────────────────────────────────────

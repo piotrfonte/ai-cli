@@ -14,16 +14,29 @@
         "chunkTimeout": 600000
       },
       "models": {
-        "mlx-community/GLM-4.7-Flash-6bit": {
-          "name": "GLM 4.7 Flash",
-          "temperature": false,
-          "limit": {
-            "context": 43008,
-            "output": 8192
-          }
-        },
         "mlx-community/Qwen3.6-35B-A3B-6bit": {
           "name": "Qwen 3.6 35B-A3B",
+          "temperature": false,
+          "limit": {
+            "context": 65536,
+            "output": 8192
+          }
+        }
+      }
+    },
+    "ooz": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "OOZ Remote",
+      "options": {
+        "baseURL": "http://127.0.0.1:8089/v1",
+        "apiKey": "ooz",
+        "logLevel": "ERROR",
+        "timeout": 600000,
+        "chunkTimeout": 600000
+      },
+      "models": {
+        "Qwen3.6-35B-A3B-GGUF:Q8_0": {
+          "name": "Qwen 3.6 35B-A3B (Q8_0, remote)",
           "temperature": false,
           "limit": {
             "context": 65536,
