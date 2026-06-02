@@ -59,17 +59,7 @@ ai() {
   local pid_file="${ai_state_dir}/mlx-lm-server.pid"
   local startup_timeout=120
 
-  # ── Model profiles ───────────────────────────────────────────────────
-  _model_glm() {
-    model_id="mlx-community/GLM-4.7-Flash-6bit"
-    model_label="GLM-4.7 Flash 6-bit"
-    model_max_tokens=8192
-    model_cache_limit=28991029248       # 27 GB Metal cache cap
-    model_prompt_cache=8589934592       # 8 GB KV / prefix cache
-    model_prompt_cache_size=2
-    model_context_limit=65536
-  }
-
+  # ── Model profile ────────────────────────────────────────────────────
   _model_qwen() {
     model_id="mlx-community/Qwen3.6-35B-A3B-6bit"
     model_label="Qwen 3.6 35B-A3B 6-bit"
@@ -166,14 +156,11 @@ ai() {
     printf "  ${c_bold}Usage:${c_reset}  ai.sh [OPTIONS] [-- frontend-args...]\n"
     echo ""
     printf "  ${c_bold}Options:${c_reset}\n"
-    printf "    ${c_cyan}-glm, --glm${c_reset}          Use GLM-4.7 Flash 6-bit\n"
-    printf "    ${c_cyan}-pi,  --pi${c_reset}           Use pi instead of opencode\n"
     printf "    ${c_cyan}-k,   --kill${c_reset}         Kill the MLX server\n"
     printf "    ${c_cyan}-h,   --help${c_reset}         Show this help\n"
     echo ""
     printf "  ${c_bold}Model:${c_reset}\n"
-    printf "    ${c_dim}default${c_reset}              Qwen 3.6 35B-A3B 6-bit\n"
-    printf "    ${c_dim}-glm${c_reset}                 GLM-4.7 Flash 6-bit\n"
+    printf "    ${c_dim}Qwen 3.6 35B-A3B 6-bit${c_reset}\n"
     echo ""
   }
 
@@ -287,26 +274,16 @@ ai() {
       _info "Install: ${c_dim}curl -LsSf https://astral.sh/uv/install.sh | sh${c_reset}"
       missing=1
     fi
-    if [[ "$frontend" == "pi" ]]; then
-      if ! command -v pi >/dev/null 2>&1; then
-        _err "Missing dependency: ${c_bold}pi${c_reset}"
-        _info "Install: ${c_dim}npm i -g @mariozechner/pi-coding-agent${c_reset}"
-        missing=1
-      fi
-    else
-      if ! command -v opencode >/dev/null 2>&1; then
-        _err "Missing dependency: ${c_bold}opencode${c_reset}"
-        _info "Install: ${c_dim}go install github.com/opencode-ai/opencode@latest${c_reset}"
-        missing=1
-      fi
+    if ! command -v opencode >/dev/null 2>&1; then
+      _err "Missing dependency: ${c_bold}opencode${c_reset}"
+      _info "Install: ${c_dim}go install github.com/opencode-ai/opencode@latest${c_reset}"
+      missing=1
     fi
     return $missing
   }
 
   # ── Main logic ───────────────────────────────────────────────────────
   local action=""               # "" | "kill" | "help"
-  local frontend="opencode"     # "pi" | "opencode"
-  local model_choice="qwen"     # "qwen" | "glm"
   local -a passthrough_args=()
 
   while [[ $# -gt 0 ]]; do
@@ -317,14 +294,6 @@ ai() {
         ;;
       -h|--help)
         action="help"
-        shift
-        ;;
-      -glm|--glm)
-        model_choice="glm"
-        shift
-        ;;
-      -pi|--pi)
-        frontend="pi"
         shift
         ;;
       --)
@@ -341,10 +310,7 @@ ai() {
   done
 
   # ── Select model profile ─────────────────────────────────────────────
-  case "$model_choice" in
-    glm) _model_glm ;;
-    *)   _model_qwen ;;
-  esac
+  _model_qwen
   local oc_model="$model_id"
 
   case "$action" in
@@ -396,15 +362,9 @@ ai() {
   echo ""
   cd "$caller_dir" || return 1
 
-  if [[ "$frontend" == "pi" ]]; then
-    _info "Launching ${c_bold}pi${c_reset} with ${c_bold}mlx/${oc_model}${c_reset}"
-    echo ""
-    pi --provider mlx --model "$oc_model" "${passthrough_args[@]}"
-  else
-    _info "Launching ${c_bold}opencode${c_reset} with ${c_bold}${oc_provider}/${oc_model}${c_reset}"
-    echo ""
-    opencode -m "${oc_provider}/${oc_model}" "${passthrough_args[@]}"
-  fi
+  _info "Launching ${c_bold}opencode${c_reset} with ${c_bold}${oc_provider}/${oc_model}${c_reset}"
+  echo ""
+  opencode -m "${oc_provider}/${oc_model}" "${passthrough_args[@]}"
   return $?
 }
 
