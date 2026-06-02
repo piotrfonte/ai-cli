@@ -4,15 +4,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Is
 
-A Bash tool (`ai.sh`) that launches a local MLX inference server (via `mlx-lm`) and connects a frontend to it. Default frontend is [opencode](https://github.com/opencode-ai/opencode); `-pi` swaps in [pi](https://github.com/badlogic/pi-mono) (`@mariozechner/pi-coding-agent`) as backup. Default model is Qwen 3.6 35B-A3B; `-glm` selects GLM-4.7 Flash. Designed for Apple Silicon Macs (M4 Max with 64GB RAM assumed).
+A Bash tool (`ai.sh`) that launches a local MLX inference server (via `mlx-lm`) and connects [opencode](https://github.com/opencode-ai/opencode) to it. The model is Qwen 3.6 35B-A3B. Designed for Apple Silicon Macs (M4 Max with 64GB RAM assumed).
 
 ## Usage
 
 ```bash
-bash ai.sh              # Qwen 3.6 + opencode (default)
-bash ai.sh -glm         # GLM-4.7 Flash + opencode
-bash ai.sh -pi          # Qwen 3.6 + pi
-bash ai.sh -pi -glm     # GLM-4.7 Flash + pi (flags are order-insensitive)
+bash ai.sh              # Qwen 3.6 + opencode
 bash ai.sh -k           # Kill the running server
 bash ai.sh -h           # Show help
 bash ai.sh -- --flag    # Pass args through to the frontend
@@ -27,14 +24,12 @@ source ai.sh && ai      # Source as a function
    - `_start_server` — runs `uv run --with mlx-lm mlx_lm.server` with tuned cache/concurrency flags
    - `_wait_for_server` — polls `/v1/models` with spinner, opens tmux log pane if in tmux
    - `_kill_server` — kills by PID file then port scan (only targets python/mlx processes)
-2. **RAG**: Checks for `smart-coding-mcp` on launch (auto-indexes via opencode MCP config; pi frontend does not auto-wire it).
-3. **Frontend launch**: After server healthy, runs the selected frontend in the caller's original `$PWD`.
-   - `opencode` (default): `opencode -m "mlx/<model-id>"`, configured via `opencode.json`.
-   - `pi` (`-pi`): runs `pi --provider mlx --model <model-id>`. The `mlx` provider must be defined in `~/.pi/agent/models.json` (pi's default config location), pointing at `http://127.0.0.1:10081/v1`.
+2. **RAG**: Checks for `smart-coding-mcp` on launch (auto-indexes via opencode MCP config).
+3. **Frontend launch**: After server healthy, runs `opencode -m "mlx/<model-id>"` (configured via `opencode.json`) in the caller's original `$PWD`.
 
 ### `opencode.json` — OpenCode provider config
 
-Configures MLX (port 10081) as an OpenAI-compatible provider. Context limit (43k GLM / 64k Qwen), output limit (8k), and timeout per model. Also configures smart-coding-mcp for RAG indexing. `chrome-devtools` MCP is registered but disabled by default — flip `enabled` to true per-session if browser automation is needed.
+Configures MLX (port 10081) as an OpenAI-compatible provider. Context limit (64k), output limit (8k), and timeout. Also configures smart-coding-mcp for RAG indexing. `chrome-devtools` MCP is registered but disabled by default — flip `enabled` to true per-session if browser automation is needed.
 
 ## Configuration
 
@@ -51,8 +46,7 @@ Environment variables can be set in `ai.env` or exported before running.
 ## Dependencies
 
 - `uv` — Python package runner
-- `opencode` — default frontend (`go install github.com/opencode-ai/opencode@latest`)
-- `pi` — backup frontend, required only with `-pi` (`npm i -g @mariozechner/pi-coding-agent`)
+- `opencode` — frontend (`go install github.com/opencode-ai/opencode@latest`)
 - `mlx-lm` — fetched automatically by `uv run --with`
 - `smart-coding-mcp` — optional, for RAG (`npm install -g smart-coding-mcp`)
 
@@ -67,7 +61,7 @@ The server launches with explicit resource caps (not relying on MLX defaults, wh
 - `--prefill-step-size` = 8192 — larger chunks reduce TTFT overhead on long prompts
 - `--decode-concurrency 1 --prompt-concurrency 1` — fully serialized, no Metal contention
 
-**Context window**: opencode advertises **65,536 tokens context / 8,192 output** for Qwen and **43,008 / 8,192** for GLM (`opencode.json`). Matches native Qwen3 64 k window and leaves headroom on 64 GB with a 35B/6-bit model resident.
+**Context window**: opencode advertises **65,536 tokens context / 8,192 output** for Qwen (`opencode.json`). Matches native Qwen3 64 k window and leaves headroom on 64 GB with a 35B/6-bit model resident.
 
 ## Key Details
 
