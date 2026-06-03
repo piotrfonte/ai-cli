@@ -352,6 +352,17 @@ ai() {
         fi
       done < <(pgrep -f "$pat" 2>/dev/null)
     done
+    # opencode-mem web UI left bound on its port after opencode died (only
+    # reap orphaned node/bun listeners — never some other app on 4747).
+    while IFS= read -r web_pid; do
+      [[ -z "$web_pid" ]] && continue
+      local wppid wcmd
+      wppid=$(ps -o ppid= -p "$web_pid" 2>/dev/null | tr -d ' ')
+      wcmd=$(ps -o comm= -p "$web_pid" 2>/dev/null | tr '[:upper:]' '[:lower:]')
+      if [[ "$wppid" == "1" && ( "$wcmd" == *node* || "$wcmd" == *bun* ) ]]; then
+        kill "$web_pid" 2>/dev/null && (( reaped++ ))
+      fi
+    done < <(lsof -ti tcp:4747 -sTCP:LISTEN 2>/dev/null)
     (( reaped > 0 )) && _info "Reaped ${reaped} orphaned MCP process(es)"
   }
 
@@ -472,6 +483,18 @@ ai() {
   else
     _warn "smart-coding-mcp not found — RAG disabled"
     _info "Install: ${c_dim}npm install -g smart-coding-mcp${c_reset}"
+  fi
+
+  # ── Memory check (opencode-mem plugin) ─────────────────────────────
+  # Persistent cross-session memory: auto-capture summarizer runs on the
+  # local MLX server, embeddings in-process, SQLite at ~/.opencode-mem.
+  if command -v node >/dev/null 2>&1 && [[ -e "${HOME}/.config/opencode/opencode-mem.jsonc" ]]; then
+    _ok "opencode-mem active ${c_dim}(local; web UI http://127.0.0.1:4747)${c_reset}"
+  else
+    _warn "opencode-mem not fully configured"
+    [[ -e "${HOME}/.config/opencode/opencode-mem.jsonc" ]] || \
+      _info "Symlink config: ${c_dim}ln -sf ${ai_dir}/opencode-mem.jsonc ~/.config/opencode/opencode-mem.jsonc${c_reset}"
+    command -v node >/dev/null 2>&1 || _info "node not found — the plugin needs Node/Bun"
   fi
 
   # ── Launch frontend ──────────────────────────────────────────────────

@@ -1,0 +1,55 @@
+// opencode-mem.jsonc — local-first persistent memory for opencode.
+//
+// Activated by "plugin": ["opencode-mem"] in opencode.json. This repo file is
+// symlinked to ~/.config/opencode/opencode-mem.jsonc (mirroring opencode.json),
+// so the config is version-controlled and inspectable.
+//
+// Design goal: 100% local. Embeddings run in-process (Xenova), the auto-capture
+// summarizer runs on the local MLX server (NOT a cloud provider), and the
+// SQLite DB + web UI are local. The only non-local event is the one-time
+// download of the Xenova embedding weights from HuggingFace on first run.
+{
+  // ── Storage — SQLite is the source of truth (inspectable, backup-able) ──
+  "storagePath": "~/.opencode-mem/data",
+  // macOS: use Homebrew SQLite (loadable extensions) instead of the system lib.
+  "customSqlitePath": "/opt/homebrew/opt/sqlite/lib/libsqlite3.dylib",
+
+  // ── Embeddings (Phase 2) — local, in-process via @xenova/transformers ──
+  // Weights download once from HuggingFace, then fully offline.
+  "embeddingModel": "Xenova/nomic-embed-text-v1",
+  "embeddingDimensions": 768,
+  "similarityThreshold": 0.6,
+  "maxMemories": 10,
+
+  // ── Auto-capture (auto-retain) summarizer → LOCAL MLX server ──────────
+  // Keeps memory extraction on-box. Requires the MLX server (ai.sh) running.
+  "memoryProvider": "openai-chat",
+  "memoryApiUrl": "http://127.0.0.1:10081/v1",
+  "memoryModel": "mlx-community/Qwen3.6-35B-A3B-6bit",
+  "memoryApiKey": "mlx",
+  "autoCaptureEnabled": true,
+  "autoCaptureMaxIterations": 3,   // light: MLX server is single-slot (decode-concurrency 1)
+
+  // ── Auto-recall — inject top memories at session start + post-compaction ──
+  "chatMessage": {
+    "enabled": true,
+    "maxMemories": 3,
+    "excludeCurrentSession": true,
+    "injectOn": "first"
+  },
+  "compaction": {
+    "enabled": true,
+    "memoryLimit": 10
+  },
+  "injectProfile": true,
+
+  // ── Inspection — local web UI ─────────────────────────────────────────
+  "webServerEnabled": true,
+  "webServerPort": 4747,
+  "webServerHost": "127.0.0.1",
+
+  // ── Hygiene ───────────────────────────────────────────────────────────
+  "deduplicationEnabled": true,
+  "autoCleanupEnabled": true,
+  "autoCleanupRetentionDays": 30
+}

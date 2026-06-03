@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Is
 
-A Bash tool (`ai.sh`) that launches a local MLX inference server (via `mlx-lm`) and connects [opencode](https://github.com/opencode-ai/opencode) to it. The local model is Qwen 3.6 35B-A3B. With `-ooz`, it instead opens an SSH tunnel to a remote OpenAI-compatible endpoint and points opencode at that. Designed for Apple Silicon Macs (M4 Max with 64GB RAM assumed).
+A Bash tool (`ai.sh`) that launches a local MLX inference server (via `mlx-lm`) and connects [opencode](https://opencode.ai) (the sst/opencode build) to it. The local model is Qwen 3.6 35B-A3B. opencode has persistent cross-session memory via the `opencode-mem` plugin (local SQLite + in-process embeddings; see the Memory section). With `-ooz`, it instead opens an SSH tunnel to a remote OpenAI-compatible endpoint and points opencode at that. Designed for Apple Silicon Macs (M4 Max with 64GB RAM assumed).
 
 ## Usage
 
@@ -35,7 +35,16 @@ source ai.sh && ai      # Source as a function
 
 ### `opencode.json` — OpenCode provider config
 
-Configures two providers: `mlx` (local, port 10081) and `ooz` (remote tunnel, port 8089), both OpenAI-compatible. The `ooz` provider declares `Qwen3.6-35B-A3B-GGUF:Q8_0` (the current remote model); the id passed via `-m` comes from `OOZ_MODEL` or runtime discovery and must match a declared id to pick up its limits. Context limit (64k), output limit (8k), and timeout. Also configures smart-coding-mcp for RAG indexing. `chrome-devtools` MCP is registered but disabled by default — flip `enabled` to true per-session if browser automation is needed.
+Configures two providers: `mlx` (local, port 10081) and `ooz` (remote tunnel, port 8089), both OpenAI-compatible. The `ooz` provider declares `Qwen3.6-35B-A3B-GGUF:Q8_0` (the current remote model); the id passed via `-m` comes from `OOZ_MODEL` or runtime discovery and must match a declared id to pick up its limits. Context limit (64k), output limit (8k), and timeout. Also configures smart-coding-mcp for RAG indexing and enables the `opencode-mem` plugin via the top-level `"plugin"` array. `chrome-devtools` MCP is registered but disabled by default — flip `enabled` to true per-session if browser automation is needed.
+
+### Memory — `opencode-mem` plugin (`opencode-mem.jsonc`)
+
+Persistent cross-session memory for opencode. Activated by `"plugin": ["opencode-mem"]` in `opencode.json`; configured by `opencode-mem.jsonc` in this repo, symlinked to `~/.config/opencode/opencode-mem.jsonc` (same pattern as `opencode.json`). Fully local:
+
+- **Storage**: SQLite (source of truth) at `~/.opencode-mem/data`; macOS uses Homebrew SQLite via `customSqlitePath`. Inspect with `sqlite3` or the web UI at `http://127.0.0.1:4747`.
+- **Embeddings (Phase 2)**: in-process Xenova `nomic-embed-text` (weights download from HuggingFace once, then offline). No Ollama needed.
+- **Auto-retain**: `autoCaptureEnabled` summarizes salient turns after idle. The summarizer is pointed at the **local MLX server** (`memoryApiUrl: http://127.0.0.1:10081/v1`) — so capture stays on-box. It therefore needs the MLX server up (always true when launched via `ai.sh`). `autoCaptureMaxIterations` is kept low (3) because the MLX server is single-slot.
+- **Auto-recall**: `chatMessage` injects top memories at session start; `compaction` restores memories after context compaction.
 
 ## Configuration
 
@@ -61,7 +70,8 @@ The real `ai.env` is gitignored. `ai.env.example` holds commented placeholders f
 
 - `uv` — Python package runner (local mode)
 - `ssh` — required for `-ooz` remote mode
-- `opencode` — frontend (`go install github.com/opencode-ai/opencode@latest`)
+- `opencode` — frontend, sst/opencode (`brew install sst/tap/opencode`)
+- `node` — required by the `opencode-mem` memory plugin (auto-installed by opencode from the `"plugin"` array)
 - `mlx-lm` — fetched automatically by `uv run --with`
 - `smart-coding-mcp` — optional, for RAG (`npm install -g smart-coding-mcp`)
 
@@ -86,5 +96,6 @@ The server launches with explicit resource caps (not relying on MLX defaults, wh
 - Startup timeout: 120 seconds
 - In tmux: auto-opens split pane tailing server log
 - The `logs/` directory is auto-pruned: `*.log` files older than 14 days are deleted at server start
-- Opencode config lives at `opencode.json` in this repo (not `~/.config`)
+- opencode config lives at `opencode.json` in this repo, symlinked from `~/.config/opencode/opencode.json`; `opencode-mem.jsonc` is symlinked the same way
 - RAG: smart-coding-mcp with Xenova/all-MiniLM-L6-v2 embeddings, auto-indexes on opencode connect
+- Memory: `opencode-mem` plugin — SQLite at `~/.opencode-mem/data`, local Xenova `nomic-embed-text` embeddings, summarizer on the local MLX server; web UI at `http://127.0.0.1:4747`
