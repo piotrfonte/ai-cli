@@ -507,11 +507,21 @@ ai() {
   fi
 
   # ── RAG check ──────────────────────────────────────────────────────
-  if command -v smart-coding-mcp >/dev/null 2>&1; then
-    _ok "smart-coding-mcp available ${c_dim}(auto-indexes on connect)${c_reset}"
+  # opencode.json points smart-coding at a private, repo-owned copy of
+  # smart-coding-mcp (so we never mutate a shared global package). Its embedder
+  # is patched to run on oMLX (bge-m3, Metal) instead of in-process Xenova —
+  # re-applied idempotently here so a `npm update` of the copy can't silently
+  # revert it. The patch falls back to Xenova if the oMLX env isn't set.
+  local sc_omlx_dir="${SMART_CODING_OMLX_DIR:-${HOME}/.smart-coding-omlx}"
+  local sc_pkg="${sc_omlx_dir}/node_modules/smart-coding-mcp"
+  if [[ -d "$sc_pkg" ]]; then
+    if command -v node >/dev/null 2>&1 && [[ -f "${ai_dir}/scripts/patch-smart-coding-omlx.mjs" ]]; then
+      node "${ai_dir}/scripts/patch-smart-coding-omlx.mjs" "$sc_pkg" >/dev/null 2>&1
+    fi
+    _ok "smart-coding-mcp available ${c_dim}(private; embeddings on oMLX bge-m3)${c_reset}"
   else
-    _warn "smart-coding-mcp not found — RAG disabled"
-    _info "Install: ${c_dim}npm install -g smart-coding-mcp${c_reset}"
+    _warn "smart-coding-mcp (oMLX) not installed — RAG disabled"
+    _info "Install: ${c_dim}npm install --prefix ${sc_omlx_dir} smart-coding-mcp${c_reset}"
   fi
 
   # ── Memory check (opencode-mem plugin) ─────────────────────────────

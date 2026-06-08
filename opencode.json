@@ -88,11 +88,14 @@
     "smart-coding": {
       "type": "local",
       "enabled": true,
-      "command": ["smart-coding-mcp", "--workspace", "."],
+      "command": ["/Users/p/.smart-coding-omlx/node_modules/.bin/smart-coding-mcp", "--workspace", "."],
       "environment": {
         "SMART_CODING_SMART_INDEXING": "true",
         "SMART_CODING_WATCH_FILES": "true",
-        "SMART_CODING_EMBEDDING_MODEL": "Xenova/all-MiniLM-L6-v2"
+        "SMART_CODING_EMBEDDING_MODEL": "bge-m3",
+        "SMART_CODING_EMBEDDING_API_URL": "http://127.0.0.1:10081/v1",
+        "SMART_CODING_EMBEDDING_API_KEY": "mlx",
+        "SMART_CODING_EMBEDDING_API_MODEL": "bge-m3"
       },
       "timeout": 60000
     },

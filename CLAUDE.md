@@ -89,7 +89,7 @@ The real `ai.env` is gitignored. `ai.env.example` holds commented placeholders f
 - `claude` — required for `-cc` mode (Claude Code)
 - `opencode` — frontend, sst/opencode (`brew install sst/tap/opencode`)
 - `node` — required by the `opencode-mem` memory plugin (auto-installed by opencode from the `"plugin"` array)
-- `smart-coding-mcp` — optional, for RAG (`npm install -g smart-coding-mcp`)
+- `smart-coding-mcp` — for RAG, installed as a **private repo-owned copy** so we can patch it without mutating a shared global: `npm install --prefix ~/.smart-coding-omlx smart-coding-mcp`. `opencode.json` launches it from there. Its in-process Xenova embedder is rerouted to oMLX (`bge-m3`) by `scripts/patch-smart-coding-omlx.mjs`, which `ai.sh` re-applies on every launch (idempotent; survives `npm update` of the copy).
 - **Models** live under `~/.omlx/models/` as MLX-format subdirectories. The Qwen weights are exposed by symlinking the HF cache snapshot to `~/.omlx/models/mlx-community/Qwen3.6-35B-A3B-6bit` (so the served id matches `opencode.json`); `bge-m3` (embeddings) is `mlx-community/bge-m3-mlx-fp16` downloaded into `~/.omlx/models/bge-m3`.
 
 ## Server Tuning
@@ -114,5 +114,5 @@ oMLX auto-tunes the paged-cache block size (e.g. 2048 tokens for the Qwen hybrid
 - In tmux: auto-opens split pane tailing server log
 - The `logs/` directory is auto-pruned: `*.log` files older than 14 days are deleted at server start
 - opencode config lives at `opencode.json` in this repo, symlinked from `~/.config/opencode/opencode.json`; `opencode-mem.jsonc` is symlinked the same way
-- RAG: smart-coding-mcp with Xenova/all-MiniLM-L6-v2 embeddings, auto-indexes on opencode connect (still in-process; not yet moved to oMLX — it has no external-endpoint option)
+- RAG: private smart-coding-mcp (`~/.smart-coding-omlx`), patched to embed via oMLX `bge-m3` (1024-dim, Metal) instead of in-process Xenova; auto-indexes on opencode connect. Switching the embedding model invalidates a workspace's `.smart-coding-cache` (dims changed) — already-indexed projects need a one-time `rm -rf .smart-coding-cache` (or the `c_clear_cache` tool) to re-index; new projects are unaffected.
 - Memory: `opencode-mem` plugin — SQLite at `~/.opencode-mem/data`, `bge-m3` embeddings + summarizer both on the local oMLX server; web UI at `http://127.0.0.1:4747`
