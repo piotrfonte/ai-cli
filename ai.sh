@@ -52,12 +52,30 @@ ai() {
   local ai_state_dir="${AI_STATE_DIR:-${HOME}/.local/state}"
 
   # ── MLX model config ──────────────────────────────────────────────────
-  local model_id model_label model_max_tokens model_cache_limit
-  local model_prompt_cache model_prompt_cache_size model_context_limit
+  local model_id model_label model_context_limit
   local server_port="${AI_PORT:-10081}"
-  local state_file="${ai_state_dir}/mlx-lm-model"
-  local pid_file="${ai_state_dir}/mlx-lm-server.pid"
+  local state_file="${ai_state_dir}/omlx-model"
+  local pid_file="${ai_state_dir}/omlx-server.pid"
   local startup_timeout=120
+
+  # ── oMLX server config (override via environment) ────────────────────
+  # oMLX is a native Apple-Silicon inference server with a two-tier KV cache
+  # (hot RAM + cold SSD) that restores recurring prefixes from disk instead of
+  # recomputing them — the agentic-coding win. Built from source into a venv;
+  # see CLAUDE.md for the build steps.
+  local omlx_bin="${OMLX_BIN:-}"
+  if [[ -z "$omlx_bin" ]]; then
+    if command -v omlx >/dev/null 2>&1; then
+      omlx_bin="omlx"
+    else
+      omlx_bin="${HOME}/.omlx/venv/bin/omlx"
+    fi
+  fi
+  local omlx_model_dir="${OMLX_MODEL_DIR:-${HOME}/.omlx/models}"
+  local omlx_cache_dir="${OMLX_CACHE_DIR:-${HOME}/.omlx/cache}"
+  local omlx_hot_cache="${OMLX_HOT_CACHE:-12GB}"      # in-RAM hot KV tier
+  local omlx_memory_guard_gb="${OMLX_MEMORY_GUARD_GB:-48}"  # ceiling on 64 GB box
+  local omlx_max_concurrent="${OMLX_MAX_CONCURRENT:-4}"     # continuous batching
 
   # ── OOZ remote endpoint config (used by -ooz; set in ai.env) ─────────
   local ooz_ssh_host="${OOZ_SSH_HOST:-}"
@@ -68,13 +86,11 @@ ai() {
   local ooz_model="${OOZ_MODEL:-}"   # pin model id; empty → auto-detect
 
   # ── Model profile ────────────────────────────────────────────────────
+  # model_id must match a model oMLX serves from --model-dir (the two-level
+  # mlx-community/<name> form is accepted) AND the id keyed in opencode.json.
   _model_qwen() {
     model_id="mlx-community/Qwen3.6-35B-A3B-6bit"
     model_label="Qwen 3.6 35B-A3B 6-bit"
-    model_max_tokens=8192
-    model_cache_limit=28991029248       # 27 GB Metal cache cap
-    model_prompt_cache=8589934592       # 8 GB KV / prefix cache
-    model_prompt_cache_size=2
     model_context_limit=65536
   }
 
@@ -121,7 +137,7 @@ ai() {
       for pid in $port_pids; do
         local cmd_name
         cmd_name=$(ps -o comm= -p "$pid" 2>/dev/null | tr '[:upper:]' '[:lower:]')
-        if [[ "$cmd_name" == *python* || "$cmd_name" == *mlx* ]]; then
+        if [[ "$cmd_name" == *python* || "$cmd_name" == *mlx* || "$cmd_name" == *omlx* ]]; then
           pids_to_kill="$pids_to_kill $pid"
         else
           _warn "Skipping unknown process on port ${server_port}: ${cmd_name} (PID ${pid})"
@@ -143,7 +159,7 @@ ai() {
         for pid in $remaining; do
           local cmd_name
           cmd_name=$(ps -o comm= -p "$pid" 2>/dev/null | tr '[:upper:]' '[:lower:]')
-          if [[ "$cmd_name" == *python* || "$cmd_name" == *mlx* ]]; then
+          if [[ "$cmd_name" == *python* || "$cmd_name" == *mlx* || "$cmd_name" == *omlx* ]]; then
             kill -9 "$pid" 2>/dev/null
           fi
         done
@@ -244,7 +260,8 @@ ai() {
     echo ""
     printf "  ${c_bold}Options:${c_reset}\n"
     printf "    ${c_cyan}-ooz, --ooz${c_reset}          Tunnel to the OOZ remote endpoint\n"
-    printf "    ${c_cyan}-k,   --kill${c_reset}         Kill the MLX server and OOZ tunnel\n"
+    printf "    ${c_cyan}-cc,  --claude-code${c_reset}  Launch Claude Code on local oMLX ${c_dim}(experimental)${c_reset}\n"
+    printf "    ${c_cyan}-k,   --kill${c_reset}         Kill the oMLX server and OOZ tunnel\n"
     printf "    ${c_cyan}-h,   --help${c_reset}         Show this help\n"
     echo ""
     printf "  ${c_bold}Model:${c_reset}\n"
@@ -257,32 +274,32 @@ ai() {
   _start_server() {
     echo ""
     _box_top
-    _box_line " ${c_bold}Starting mlx-lm Server${c_reset}"
+    _box_line " ${c_bold}Starting oMLX Server${c_reset}"
     _box_mid
     _box_line " ${c_bold}Model:${c_reset} ${model_label}"
     _box_line " ${c_dim}${model_id}${c_reset}"
     _box_line " ${c_bold}Port:${c_reset}  ${server_port}"
+    _box_line " ${c_bold}KV:${c_reset}    hot ${omlx_hot_cache} + SSD ${c_dim}${omlx_cache_dir}${c_reset}"
     _box_bottom
     echo ""
 
-    mkdir -p "$(dirname "$state_file")"
+    mkdir -p "$(dirname "$state_file")" "$omlx_cache_dir" "$omlx_model_dir"
     local log_dir="${ai_log_dir}"
     mkdir -p "$log_dir"
     find "$log_dir" -maxdepth 1 -type f -name '*.log' -mtime +14 -delete 2>/dev/null
-    local server_log="${log_dir}/mlx-lm-server-$(date +%Y%m%d-%H%M%S).log"
+    local server_log="${log_dir}/omlx-server-$(date +%Y%m%d-%H%M%S).log"
 
-    MLX_CACHE_LIMIT="$model_cache_limit" \
-    uv run --no-project --with mlx-lm mlx_lm.server \
-      --model "$model_id" \
+    # oMLX discovers models from --model-dir subdirectories; opencode picks the
+    # model per request, so we don't pass --model. The paged SSD cache + hot
+    # RAM tier are what collapse agentic time-to-first-token from ~30s to ~1s.
+    "$omlx_bin" serve \
+      --model-dir "$omlx_model_dir" \
       --port "$server_port" \
-      --max-tokens "$model_max_tokens" \
-      --temp 0.2 \
-      --top-p 1.0 \
-      --prefill-step-size 8192 \
-      --prompt-cache-bytes "$model_prompt_cache" \
-      --prompt-cache-size "$model_prompt_cache_size" \
-      --decode-concurrency 1 \
-      --prompt-concurrency 1 \
+      --paged-ssd-cache-dir "$omlx_cache_dir" \
+      --hot-cache-max-size "$omlx_hot_cache" \
+      --memory-guard-gb "$omlx_memory_guard_gb" \
+      --max-concurrent-requests "$omlx_max_concurrent" \
+      --log-level info \
       >"$server_log" 2>&1 &
     local server_pid=$!
     echo "$server_pid" > "$pid_file"
@@ -369,7 +386,13 @@ ai() {
   # ── Dependency checks (mode-aware) ───────────────────────────────────
   _check_deps() {
     local missing=0
-    if ! command -v opencode >/dev/null 2>&1; then
+    if [[ "$mode" == "cc" ]]; then
+      if ! command -v claude >/dev/null 2>&1; then
+        _err "Missing dependency: ${c_bold}claude${c_reset} (Claude Code)"
+        _info "Install: ${c_dim}https://claude.com/claude-code${c_reset}"
+        missing=1
+      fi
+    elif ! command -v opencode >/dev/null 2>&1; then
       _err "Missing dependency: ${c_bold}opencode${c_reset}"
       _info "Install: ${c_dim}go install github.com/opencode-ai/opencode@latest${c_reset}"
       missing=1
@@ -379,9 +402,11 @@ ai() {
         _err "Missing dependency: ${c_bold}ssh${c_reset}"
         missing=1
       fi
-    elif ! command -v uv >/dev/null 2>&1; then
-      _err "Missing dependency: ${c_bold}uv${c_reset}"
-      _info "Install: ${c_dim}curl -LsSf https://astral.sh/uv/install.sh | sh${c_reset}"
+    elif [[ ! -x "$omlx_bin" ]] && ! command -v omlx >/dev/null 2>&1; then
+      _err "Missing dependency: ${c_bold}omlx${c_reset} (expected at ${c_dim}${omlx_bin}${c_reset})"
+      _info "Build: ${c_dim}git clone https://github.com/jundot/omlx ~/.omlx/src \\"
+      _info "  && uv venv ~/.omlx/venv --python 3.12 \\"
+      _info "  && VIRTUAL_ENV=~/.omlx/venv uv pip install -e ~/.omlx/src${c_reset}"
       missing=1
     fi
     return $missing
@@ -389,7 +414,7 @@ ai() {
 
   # ── Main logic ───────────────────────────────────────────────────────
   local action=""               # "" | "kill" | "help"
-  local mode="local"            # "local" | "ooz"
+  local mode="local"            # "local" | "ooz" | "cc"
   local -a passthrough_args=()
 
   while [[ $# -gt 0 ]]; do
@@ -404,6 +429,10 @@ ai() {
         ;;
       -ooz|--ooz)
         mode="ooz"
+        shift
+        ;;
+      -cc|--claude-code)
+        mode="cc"
         shift
         ;;
       --)
@@ -486,8 +515,8 @@ ai() {
   fi
 
   # ── Memory check (opencode-mem plugin) ─────────────────────────────
-  # Persistent cross-session memory: auto-capture summarizer runs on the
-  # local MLX server, embeddings in-process, SQLite at ~/.opencode-mem.
+  # Persistent cross-session memory: auto-capture summarizer + embeddings run
+  # on the local oMLX server, SQLite at ~/.opencode-mem.
   if command -v node >/dev/null 2>&1 && [[ -e "${HOME}/.config/opencode/opencode-mem.jsonc" ]]; then
     _ok "opencode-mem active ${c_dim}(local; web UI http://127.0.0.1:4747)${c_reset}"
   else
@@ -500,6 +529,21 @@ ai() {
   # ── Launch frontend ──────────────────────────────────────────────────
   echo ""
   cd "$caller_dir" || return 1
+
+  if [[ "$mode" == "cc" ]]; then
+    # Experimental: point Claude Code at the local oMLX Anthropic-compatible
+    # endpoint (/v1/messages). Claude Code believes it's talking to Anthropic;
+    # oMLX serves Qwen. ANTHROPIC_MODEL overrides the requested model id so the
+    # request resolves to a model oMLX actually serves.
+    _info "Launching ${c_bold}Claude Code${c_reset} → ${c_bold}local oMLX${c_reset} ${c_dim}(experimental)${c_reset}"
+    echo ""
+    ANTHROPIC_BASE_URL="http://127.0.0.1:${server_port}" \
+    ANTHROPIC_API_KEY="omlx" \
+    ANTHROPIC_MODEL="$model_id" \
+    ANTHROPIC_SMALL_FAST_MODEL="$model_id" \
+    claude "${passthrough_args[@]}"
+    return $?
+  fi
 
   _info "Launching ${c_bold}opencode${c_reset} with ${c_bold}${oc_provider}/${oc_model}${c_reset}"
   echo ""

@@ -4,31 +4,39 @@
 // symlinked to ~/.config/opencode/opencode-mem.jsonc (mirroring opencode.json),
 // so the config is version-controlled and inspectable.
 //
-// Design goal: 100% local. Embeddings run in-process (Xenova), the auto-capture
-// summarizer runs on the local MLX server (NOT a cloud provider), and the
-// SQLite DB + web UI are local. The only non-local event is the one-time
-// download of the Xenova embedding weights from HuggingFace on first run.
+// Design goal: 100% local. Embeddings (bge-m3) and the auto-capture summarizer
+// both run on the local oMLX server (NOT a cloud provider), and the SQLite DB +
+// web UI are local. The only non-local event is the one-time model download
+// from HuggingFace on first run.
 {
   // ── Storage — SQLite is the source of truth (inspectable, backup-able) ──
   "storagePath": "~/.opencode-mem/data",
   // macOS: use Homebrew SQLite (loadable extensions) instead of the system lib.
   "customSqlitePath": "/opt/homebrew/opt/sqlite/lib/libsqlite3.dylib",
 
-  // ── Embeddings (Phase 2) — local, in-process via @xenova/transformers ──
-  // Weights download once from HuggingFace, then fully offline.
-  "embeddingModel": "Xenova/nomic-embed-text-v1",
-  "embeddingDimensions": 768,
+  // ── Embeddings — oMLX-served bge-m3 (MLX/Metal, 1024-dim) ─────────────
+  // Setting embeddingApiUrl + embeddingApiKey switches opencode-mem from the
+  // in-process Xenova path to the remote endpoint (POSTs to ${url}/embeddings).
+  // Metal-accelerated and higher quality than Xenova nomic; requires the oMLX
+  // server up (already true via ai.sh, same as the summarizer below).
+  "embeddingModel": "bge-m3",
+  "embeddingApiUrl": "http://127.0.0.1:10081/v1",
+  "embeddingApiKey": "mlx",
+  "embeddingDimensions": 1024,
   "similarityThreshold": 0.6,
   "maxMemories": 10,
 
-  // ── Auto-capture (auto-retain) summarizer → LOCAL MLX server ──────────
-  // Keeps memory extraction on-box. Requires the MLX server (ai.sh) running.
+  // ── Auto-capture (auto-retain) summarizer → LOCAL oMLX server ─────────
+  // Keeps memory extraction on-box. Requires the oMLX server (ai.sh) running.
   "memoryProvider": "openai-chat",
   "memoryApiUrl": "http://127.0.0.1:10081/v1",
   "memoryModel": "mlx-community/Qwen3.6-35B-A3B-6bit",
   "memoryApiKey": "mlx",
   "autoCaptureEnabled": true,
-  "autoCaptureMaxIterations": 3,   // light: MLX server is single-slot (decode-concurrency 1)
+  // oMLX does continuous batching (--max-concurrent-requests 4), so the
+  // summarizer no longer fights the coding turn for a single decode slot —
+  // its calls overlap. Raised 3 → 8 now that contention is gone.
+  "autoCaptureMaxIterations": 8,
 
   // ── Auto-recall — inject top memories at session start + post-compaction ──
   "chatMessage": {
