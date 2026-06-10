@@ -73,9 +73,10 @@ ai() {
   fi
   local omlx_model_dir="${OMLX_MODEL_DIR:-${HOME}/.omlx/models}"
   local omlx_cache_dir="${OMLX_CACHE_DIR:-${HOME}/.omlx/cache}"
-  local omlx_hot_cache="${OMLX_HOT_CACHE:-12GB}"      # in-RAM hot KV tier
+  local omlx_hot_cache="${OMLX_HOT_CACHE:-8GB}"       # in-RAM hot KV tier; model+tier must stay under the guard's soft threshold (85%)
+  local omlx_ssd_cache_max="${OMLX_SSD_CACHE_MAX:-40GB}"    # disk cap; oMLX defaults to nearly all free space
   local omlx_memory_guard_gb="${OMLX_MEMORY_GUARD_GB:-48}"  # ceiling on 64 GB box
-  local omlx_max_concurrent="${OMLX_MAX_CONCURRENT:-4}"     # continuous batching
+  local omlx_max_concurrent="${OMLX_MAX_CONCURRENT:-2}"     # continuous batching: 1 coding turn + 1 opencode-mem summarizer
 
   # ── OOZ remote endpoint config (used by -ooz; set in ai.env) ─────────
   local ooz_ssh_host="${OOZ_SSH_HOST:-}"
@@ -279,7 +280,7 @@ ai() {
     _box_line " ${c_bold}Model:${c_reset} ${model_label}"
     _box_line " ${c_dim}${model_id}${c_reset}"
     _box_line " ${c_bold}Port:${c_reset}  ${server_port}"
-    _box_line " ${c_bold}KV:${c_reset}    hot ${omlx_hot_cache} + SSD ${c_dim}${omlx_cache_dir}${c_reset}"
+    _box_line " ${c_bold}KV:${c_reset}    hot ${omlx_hot_cache} + SSD ≤${omlx_ssd_cache_max} ${c_dim}${omlx_cache_dir}${c_reset}"
     _box_bottom
     echo ""
 
@@ -296,6 +297,7 @@ ai() {
       --model-dir "$omlx_model_dir" \
       --port "$server_port" \
       --paged-ssd-cache-dir "$omlx_cache_dir" \
+      --paged-ssd-cache-max-size "$omlx_ssd_cache_max" \
       --hot-cache-max-size "$omlx_hot_cache" \
       --memory-guard-gb "$omlx_memory_guard_gb" \
       --max-concurrent-requests "$omlx_max_concurrent" \

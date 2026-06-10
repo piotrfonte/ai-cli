@@ -64,9 +64,10 @@ Environment variables can be set in `ai.env` or exported before running.
 | `OMLX_BIN` | `~/.omlx/venv/bin/omlx` (else `omlx` on PATH) | oMLX server binary |
 | `OMLX_MODEL_DIR` | `~/.omlx/models` | Dir oMLX discovers models from (subdirectories) |
 | `OMLX_CACHE_DIR` | `~/.omlx/cache` | Paged SSD KV-cache directory |
-| `OMLX_HOT_CACHE` | `12GB` | In-RAM hot KV-cache tier size |
+| `OMLX_HOT_CACHE` | `8GB` | In-RAM hot KV-cache tier size (model + tier must fit under the memory guard's soft threshold) |
+| `OMLX_SSD_CACHE_MAX` | `40GB` | Disk cap for the paged SSD cache (unset, oMLX claims nearly all free disk) |
 | `OMLX_MEMORY_GUARD_GB` | `48` | Memory ceiling oMLX won't exceed (headroom on 64 GB) |
-| `OMLX_MAX_CONCURRENT` | `4` | Max concurrent requests (continuous batching) |
+| `OMLX_MAX_CONCURRENT` | `2` | Max concurrent requests (continuous batching): 1 coding turn + 1 opencode-mem summarizer. Don't set to 1 — memory captures would serialize with coding turns |
 | `OOZ_SSH_HOST` | — | Remote SSH host for `-ooz` (delicate; set in `ai.env`) |
 | `OOZ_SSH_USER` | — | Remote SSH user for `-ooz` (delicate; set in `ai.env`) |
 | `OOZ_SSH_PORT` | `22` | Remote SSH port for `-ooz` |
@@ -97,9 +98,10 @@ The real `ai.env` is gitignored. `ai.env.example` holds commented placeholders f
 oMLX launches with explicit flags (see the `OMLX_*` Configuration vars):
 
 - `--paged-ssd-cache-dir ~/.omlx/cache` — **the headline feature.** Block-based KV cache (vLLM-style, prefix sharing + copy-on-write) with a cold SSD tier; recurring prefixes (system prompt, shared codebase context) are restored from disk on a cache hit — even across a server restart — instead of recomputed. Measured locally: cold prefill ~2.3s → warm ~0.6s on a shared prefix.
-- `--hot-cache-max-size 12GB` — in-RAM hot KV tier (oMLX default is 0/disabled; must be set explicitly). Bigger tier = more in-memory hits before spilling to SSD.
-- `--memory-guard-gb 48` — hard ceiling oMLX won't exceed, leaving ~16 GB for macOS/apps on a 64 GB machine. Replaces the old `MLX_CACHE_LIMIT`. Raise on 128 GB configs.
-- `--max-concurrent-requests 4` — continuous batching. Lets the opencode-mem summarizer overlap a coding turn instead of serializing on one slot.
+- `--paged-ssd-cache-max-size 40GB` — disk cap for the SSD tier; oMLX evicts LRU within it. Without it oMLX sizes the cache off free disk space and will grow until the disk is nearly full.
+- `--hot-cache-max-size 8GB` — in-RAM hot KV tier (oMLX default is 0/disabled; must be set explicitly). Bigger tier = more in-memory hits before spilling to SSD — but model (~29.5 GB) + tier must stay under the memory guard's **soft threshold (85% of the guard = 40.8 GB at 48)**; at 12 GB the steady state sat above it and the enforcer evicted models mid-request (aborted completions = the agent "choking").
+- `--memory-guard-gb 48` — hard ceiling oMLX won't exceed, leaving ~16 GB for macOS/apps on a 64 GB machine. Replaces the old `MLX_CACHE_LIMIT`. Raise on 128 GB configs. Eviction starts at the 85% soft threshold, not the ceiling.
+- `--max-concurrent-requests 2` — continuous batching. One slot for the interactive coding turn, one so the opencode-mem summarizer can overlap it instead of serializing. Kept at 2 (not higher) because each concurrent prefill adds transient working memory against the guard's soft threshold; embeddings run on the separate bge-m3 engine and don't compete for these slots.
 
 oMLX auto-tunes the paged-cache block size (e.g. 2048 tokens for the Qwen hybrid model) and reads the model's native context (Qwen3.6 reports 262 144).
 
