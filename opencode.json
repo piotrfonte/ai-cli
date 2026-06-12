@@ -19,7 +19,7 @@
           "name": "Qwen 3.6 35B-A3B",
           "temperature": false,
           "limit": {
-            "context": 65536,
+            "context": 49152,
             "output": 8192
           }
         }

@@ -529,6 +529,22 @@ ai() {
   # ── Memory check (opencode-mem plugin) ─────────────────────────────
   # Persistent cross-session memory: auto-capture summarizer + embeddings run
   # on the local oMLX server, SQLite at ~/.opencode-mem.
+  #
+  # The summarizer is a raw OpenAI client to oMLX (memoryApiUrl), so it bypasses
+  # opencode.json's context limit and would otherwise feed oMLX the full,
+  # uncapped turn transcript (~120k tokens observed) — saturating the memory
+  # guard, throttling coding turns and 507-ing concurrent bge-m3 loads. We patch
+  # its buildMarkdownContext to cap the summarizer input (idempotent; re-applied
+  # so a plugin re-download can't revert it). opencode may load either the
+  # config-dir install or its plugin cache, so patch both if present.
+  if command -v node >/dev/null 2>&1 && [[ -f "${ai_dir}/scripts/patch-opencode-mem-cap.mjs" ]]; then
+    for mem_pkg in \
+      "${HOME}/.config/opencode/node_modules/opencode-mem" \
+      "${HOME}"/.cache/opencode/packages/opencode-mem@*/node_modules/opencode-mem; do
+      [[ -d "$mem_pkg" ]] || continue
+      node "${ai_dir}/scripts/patch-opencode-mem-cap.mjs" "$mem_pkg" >/dev/null 2>&1
+    done
+  fi
   if command -v node >/dev/null 2>&1 && [[ -e "${HOME}/.config/opencode/opencode-mem.jsonc" ]]; then
     _ok "opencode-mem active ${c_dim}(local; web UI http://127.0.0.1:4747)${c_reset}"
   else

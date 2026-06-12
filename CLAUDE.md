@@ -49,6 +49,7 @@ Persistent cross-session memory for opencode. Activated by `"plugin": ["opencode
 - **Storage**: SQLite (source of truth) at `~/.opencode-mem/data`; macOS uses Homebrew SQLite via `customSqlitePath`. Inspect with `sqlite3` or the web UI at `http://127.0.0.1:4747`.
 - **Embeddings**: `bge-m3` (1024-dim, MLX/Metal) served by **oMLX** via `/v1/embeddings`. Setting `embeddingApiUrl` + `embeddingApiKey` in `opencode-mem.jsonc` switches the plugin off its in-process Xenova path onto the oMLX endpoint. (Switching from the old 768-dim nomic embeddings changes dimensions — if recall misbehaves on an existing store, clear `~/.opencode-mem/data` to force re-embedding.)
 - **Auto-retain**: `autoCaptureEnabled` summarizes salient turns after idle. The summarizer is pointed at the **local oMLX server** (`memoryApiUrl: http://127.0.0.1:10081/v1`) — so capture stays on-box. It needs the oMLX server up (always true when launched via `ai.sh`). `autoCaptureMaxIterations` is raised to 8 now that oMLX's continuous batching lets the summarizer overlap coding turns instead of fighting a single decode slot.
+  - **Input cap (important)**: the summarizer is a raw OpenAI client to oMLX, so it **bypasses opencode.json's context limit**. Its `buildMarkdownContext` includes the full, uncapped assistant text of a turn — and when captures fall behind, the message slice spans much of the conversation. Left unbounded this produced ~120k-token summarizer prefills whose KV cache saturated the memory guard: interactive coding turns got throttled (a 3.8k-token turn took 340s) and concurrent `bge-m3` embedding loads were rejected with HTTP 507 — the agent appeared to "choke" mid-task. `ai.sh` re-applies `scripts/patch-opencode-mem-cap.mjs` on every launch (idempotent; patches both the config-dir install and the plugin cache) to cap the summarizer input to `OPENCODE_MEM_MAX_CONTEXT_CHARS` chars (default 24000 ≈ 6k tokens), keeping the request-framing head and outcome tail and eliding the middle. This is what makes the `autoCaptureMaxIterations: 8` overlap safe.
 - **Auto-recall**: `chatMessage` injects top memories at session start; `compaction` restores memories after context compaction.
 
 ## Configuration
@@ -68,6 +69,7 @@ Environment variables can be set in `ai.env` or exported before running.
 | `OMLX_SSD_CACHE_MAX` | `40GB` | Disk cap for the paged SSD cache (unset, oMLX claims nearly all free disk) |
 | `OMLX_MEMORY_GUARD_GB` | `48` | Memory ceiling oMLX won't exceed (headroom on 64 GB) |
 | `OMLX_MAX_CONCURRENT` | `2` | Max concurrent requests (continuous batching): 1 coding turn + 1 opencode-mem summarizer. Don't set to 1 — memory captures would serialize with coding turns |
+| `OPENCODE_MEM_MAX_CONTEXT_CHARS` | `24000` | Char budget the opencode-mem summarizer input is capped to (≈6k tokens). Read by the patched plugin (see Memory section); prevents unbounded summarizer prefills from saturating the memory guard |
 | `OOZ_SSH_HOST` | — | Remote SSH host for `-ooz` (delicate; set in `ai.env`) |
 | `OOZ_SSH_USER` | — | Remote SSH user for `-ooz` (delicate; set in `ai.env`) |
 | `OOZ_SSH_PORT` | `22` | Remote SSH port for `-ooz` |
@@ -89,7 +91,7 @@ The real `ai.env` is gitignored. `ai.env.example` holds commented placeholders f
 - `ssh` — required for `-ooz` remote mode
 - `claude` — required for `-cc` mode (Claude Code)
 - `opencode` — frontend, sst/opencode (`brew install sst/tap/opencode`)
-- `node` — required by the `opencode-mem` memory plugin (auto-installed by opencode from the `"plugin"` array)
+- `node` — required by the `opencode-mem` memory plugin (auto-installed by opencode from the `"plugin"` array). On launch `ai.sh` also re-applies `scripts/patch-opencode-mem-cap.mjs` to cap the plugin's summarizer input (idempotent; see the Memory section)
 - `smart-coding-mcp` — for RAG, installed as a **private repo-owned copy** so we can patch it without mutating a shared global: `npm install --prefix ~/.smart-coding-omlx smart-coding-mcp`. `opencode.json` launches it from there. Its in-process Xenova embedder is rerouted to oMLX (`bge-m3`) by `scripts/patch-smart-coding-omlx.mjs`, which `ai.sh` re-applies on every launch (idempotent; survives `npm update` of the copy).
 - **Models** live under `~/.omlx/models/` as MLX-format subdirectories. The Qwen weights are exposed by symlinking the HF cache snapshot to `~/.omlx/models/mlx-community/Qwen3.6-35B-A3B-6bit` (so the served id matches `opencode.json`); `bge-m3` (embeddings) is `mlx-community/bge-m3-mlx-fp16` downloaded into `~/.omlx/models/bge-m3`.
 
@@ -105,7 +107,7 @@ oMLX launches with explicit flags (see the `OMLX_*` Configuration vars):
 
 oMLX auto-tunes the paged-cache block size (e.g. 2048 tokens for the Qwen hybrid model) and reads the model's native context (Qwen3.6 reports 262 144).
 
-**Context window**: opencode advertises **65,536 tokens context / 8,192 output** for Qwen (`opencode.json`) — conservative vs the native 256 k window, leaving headroom on 64 GB with a 35B/6-bit model resident.
+**Context window**: opencode advertises **49,152 tokens context / 8,192 output** for the local `mlx` Qwen (`opencode.json`) — conservative vs the native 256 k window. Lowered from 65,536: a full-window coding turn's KV cache, stacked on the resident model (~27.5 GB) and a warm hot-cache prefix preload, transiently spiked total memory past Apple's Metal working-set cap (51.8 GB on this 64 GB machine, since `iogpu.wired_limit_mb` is unset) and oMLX force-killed the prefill (`Memory limit exceeded during prefill`) — the agent "choked." 48 k bounds the worst-case KV so the spike stays under the Metal cap. The remote `ooz` provider stays at 64 k (it runs on a different machine, not subject to this Mac's Metal cap). If you raise `iogpu.wired_limit_mb` (e.g. `sudo sysctl iogpu.wired_limit_mb=57344`), the local limit can go back up.
 
 ## Key Details
 

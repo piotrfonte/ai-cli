@@ -33,9 +33,17 @@
   "memoryModel": "mlx-community/Qwen3.6-35B-A3B-6bit",
   "memoryApiKey": "mlx",
   "autoCaptureEnabled": true,
-  // oMLX does continuous batching (--max-concurrent-requests 4), so the
+  // oMLX does continuous batching (--max-concurrent-requests 2), so the
   // summarizer no longer fights the coding turn for a single decode slot —
   // its calls overlap. Raised 3 → 8 now that contention is gone.
+  //
+  // NOTE: the summarizer is a raw OpenAI client to oMLX (memoryApiUrl below), so
+  // it bypasses opencode.json's context limit. Left unbounded it fed oMLX the
+  // full turn transcript (~120k tokens), saturating the memory guard — coding
+  // turns throttled, concurrent bge-m3 loads 507'd. ai.sh patches the plugin
+  // (scripts/patch-opencode-mem-cap.mjs) to cap the summarizer input to
+  // OPENCODE_MEM_MAX_CONTEXT_CHARS chars (default 24000 ≈ 6k tokens), which is
+  // what makes this overlap safe. Don't raise iterations without that cap.
   "autoCaptureMaxIterations": 8,
 
   // ── Auto-recall — inject top memories at session start + post-compaction ──
