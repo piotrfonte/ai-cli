@@ -3,3 +3,4 @@
 logs
 .DS_Store
 ai.env
+__pycache__

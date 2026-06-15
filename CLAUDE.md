@@ -4,12 +4,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Is
 
-A Bash tool (`ai.sh`) that launches a local [oMLX](https://github.com/jundot/omlx) inference server and connects [opencode](https://opencode.ai) (the sst/opencode build) to it. The local model is Qwen 3.6 35B-A3B. oMLX is a native Apple-Silicon server whose two-tier KV cache (hot RAM + cold SSD) restores recurring prompt prefixes from disk instead of recomputing them, collapsing agentic time-to-first-token from ~30s to ~1s, and it serves the LLM **and** the embedding model (bge-m3) from one process with continuous batching. opencode has persistent cross-session memory via the `opencode-mem` plugin (local SQLite; embeddings + summarizer run on oMLX — see the Memory section). With `-ooz`, it instead opens an SSH tunnel to a remote OpenAI-compatible endpoint; with `-cc`, it points Claude Code at the local oMLX Anthropic endpoint. Designed for Apple Silicon Macs (M4 Max with 64GB RAM assumed).
+A Bash tool (`ai.sh`) that launches a local [oMLX](https://github.com/jundot/omlx) inference server and connects [opencode](https://opencode.ai) (the sst/opencode build) to it. The local model is Qwen 3.6 35B-A3B 6-bit (or, with `-light`, the same MoE at 4-bit: Qwen 3.6 35B-A3B 4-bit). oMLX is a native Apple-Silicon server whose two-tier KV cache (hot RAM + cold SSD) restores recurring prompt prefixes from disk instead of recomputing them, collapsing agentic time-to-first-token from ~30s to ~1s, and it serves the LLM **and** the embedding model (bge-m3) from one process with continuous batching. opencode has persistent cross-session memory via the `opencode-mem` plugin (local SQLite; embeddings + summarizer run on oMLX — see the Memory section). With `-ooz`, it instead opens an SSH tunnel to a remote OpenAI-compatible endpoint; with `-cc`, it points Claude Code at the local oMLX Anthropic endpoint. Designed for Apple Silicon Macs (M4 Max with 64GB RAM assumed).
 
 ## Usage
 
 ```bash
-bash ai.sh              # Qwen 3.6 (local oMLX) + opencode
+bash ai.sh              # Qwen 3.6 35B-A3B 6-bit (local oMLX) + opencode
+bash ai.sh -light       # Qwen 3.6 35B-A3B 4-bit (lighter local model) + opencode
 bash ai.sh -ooz         # SSH tunnel to the OOZ remote endpoint + opencode
 bash ai.sh -cc          # Claude Code → local oMLX (experimental)
 bash ai.sh -k           # Kill the local server and OOZ tunnel
@@ -17,6 +18,10 @@ bash ai.sh -h           # Show help
 bash ai.sh -- --flag    # Pass args through to the frontend
 source ai.sh && ai      # Source as a function
 ```
+
+### `-light` lighter local model
+
+`ai -light` runs the **Qwen 3.6 35B-A3B at 4-bit** (`mlx-community/Qwen3.6-35B-A3B-4bit`) instead of the default 6-bit — the same A3B MoE (3B active params, so the same decode speed), just lower precision. It's ~20 GB resident vs ~27.5 GB, so it loads faster and leaves more memory headroom — enough that the Metal-cap throttling which caps the 6-bit at 49 k context doesn't bind, so its `opencode.json` window is a larger 65 k. The weights are **auto-downloaded on first use** (see below); the model id is declared in `opencode.json` under provider `mlx`. Combine with `-cc` to point Claude Code at it; `-light` is ignored under `-ooz` (that path uses the remote model).
 
 ### `-cc` Claude Code mode
 
@@ -52,6 +57,21 @@ Persistent cross-session memory for opencode. Activated by `"plugin": ["opencode
   - **Input cap (important)**: the summarizer is a raw OpenAI client to oMLX, so it **bypasses opencode.json's context limit**. Its `buildMarkdownContext` includes the full, uncapped assistant text of a turn — and when captures fall behind, the message slice spans much of the conversation. Left unbounded this produced ~120k-token summarizer prefills whose KV cache saturated the memory guard: interactive coding turns got throttled (a 3.8k-token turn took 340s) and concurrent `bge-m3` embedding loads were rejected with HTTP 507 — the agent appeared to "choke" mid-task. `ai.sh` re-applies `scripts/patch-opencode-mem-cap.mjs` on every launch (idempotent; patches both the config-dir install and the plugin cache) to cap the summarizer input to `OPENCODE_MEM_MAX_CONTEXT_CHARS` chars (default 24000 ≈ 6k tokens), keeping the request-framing head and outcome tail and eliding the middle. This is what makes the `autoCaptureMaxIterations: 8` overlap safe.
 - **Auto-recall**: `chatMessage` injects top memories at session start; `compaction` restores memories after context compaction.
 
+### Post-edit checks — `post-edit-check` plugin (`plugins/post-edit-check.js`)
+
+Deterministic lint/typecheck enforcement so the agent never leaves broken code behind. Prompt-level rules ("always run the linter") are advisory and get skipped — especially by the local 35B model — so this rides opencode's **`tool.execute.after`** hook, the one lever that can **throw an error back into the agent loop** and force a fix before the turn finishes. Same plugin mechanism as `opencode-mem`.
+
+After every `edit`/`write` to a JS/TS file, scoped to that file's project (nearest `package.json`):
+
+1. **Auto-fix (silent)**: `prettier --write` then `eslint --fix`.
+2. **Re-check**: `eslint --format json` (**file-scoped** — only the edited file's own errors block) and `tsc --noEmit --incremental` (project-wide; blocks only on type errors in files the agent touched this session, so a ripple error in another file still blocks, but pre-existing errors in untouched files are surfaced as non-blocking notes).
+3. **Block**: any remaining errors are `throw`n as a concise `file:line  rule/code  message` list, forcing the model to fix them.
+4. **Capped retries**: after `OPENCODE_LINT_MAX_RETRIES` consecutive throws for the same file+error set, it stops blocking and warns instead — so the local model can't doom-loop on something it can't fix (note `opencode.json` sets `"doom_loop": "allow"`, so this in-plugin cap is the real safeguard).
+
+Auto-detects tooling and **no-ops cleanly** when ESLint config / `tsconfig.json` / Prettier are absent — so non-TS projects and this bash-only repo are unaffected. Binaries resolve from the project's `node_modules/.bin` first, else `npx --no-install` (never auto-installs). tsc uses `--incremental` + a cached `tsBuildInfoFile` so repeated whole-project checks stay cheap on this memory-constrained box (only files changed since the last run are re-checked); it runs after every edit — no time-based skip — so a freshly-introduced type error can never slip through.
+
+**Global, not per-project**: opencode auto-loads any file in `~/.config/opencode/plugins/` **at startup** (note the directory is **plural** — the singular `"plugin"` key in `opencode.json` is the npm-package array, a *different* mechanism), so `ai.sh` symlinks the repo's `plugins/post-edit-check.js` there on every launch (idempotent `ln -sf`) — it applies in every project opencode opens. It is **not** in `opencode.json`'s `"plugin"` array (that array is for npm-package plugins like `opencode-mem`; plugin-dir files are discovered automatically). Because plugins load only at startup, **opencode must be restarted to pick up the plugin or any change to it.**
+
 ## Configuration
 
 Environment variables can be set in `ai.env` or exported before running.
@@ -70,6 +90,10 @@ Environment variables can be set in `ai.env` or exported before running.
 | `OMLX_MEMORY_GUARD_GB` | `48` | Memory ceiling oMLX won't exceed (headroom on 64 GB) |
 | `OMLX_MAX_CONCURRENT` | `2` | Max concurrent requests (continuous batching): 1 coding turn + 1 opencode-mem summarizer. Don't set to 1 — memory captures would serialize with coding turns |
 | `OPENCODE_MEM_MAX_CONTEXT_CHARS` | `24000` | Char budget the opencode-mem summarizer input is capped to (≈6k tokens). Read by the patched plugin (see Memory section); prevents unbounded summarizer prefills from saturating the memory guard |
+| `OPENCODE_LINT_ENABLED` | `true` | Master on/off for the post-edit-check plugin (ESLint + tsc + Prettier on edit) |
+| `OPENCODE_LINT_CHECKS` | `eslint,tsc,prettier` | Which post-edit checks to run (comma-separated subset) |
+| `OPENCODE_LINT_MAX_RETRIES` | `3` | Consecutive blocking throws per file before post-edit-check falls back to warn-only (doom-loop guard) |
+| `OPENCODE_LINT_EXTENSIONS` | `.ts,.tsx,.js,.jsx,.mjs,.cjs` | File extensions the post-edit-check hook acts on |
 | `OOZ_SSH_HOST` | — | Remote SSH host for `-ooz` (delicate; set in `ai.env`) |
 | `OOZ_SSH_USER` | — | Remote SSH user for `-ooz` (delicate; set in `ai.env`) |
 | `OOZ_SSH_PORT` | `22` | Remote SSH port for `-ooz` |
@@ -93,7 +117,7 @@ The real `ai.env` is gitignored. `ai.env.example` holds commented placeholders f
 - `opencode` — frontend, sst/opencode (`brew install sst/tap/opencode`)
 - `node` — required by the `opencode-mem` memory plugin (auto-installed by opencode from the `"plugin"` array). On launch `ai.sh` also re-applies `scripts/patch-opencode-mem-cap.mjs` to cap the plugin's summarizer input (idempotent; see the Memory section)
 - `smart-coding-mcp` — for RAG, installed as a **private repo-owned copy** so we can patch it without mutating a shared global: `npm install --prefix ~/.smart-coding-omlx smart-coding-mcp`. `opencode.json` launches it from there. Its in-process Xenova embedder is rerouted to oMLX (`bge-m3`) by `scripts/patch-smart-coding-omlx.mjs`, which `ai.sh` re-applies on every launch (idempotent; survives `npm update` of the copy).
-- **Models** live under `~/.omlx/models/` as MLX-format subdirectories. The Qwen weights are exposed by symlinking the HF cache snapshot to `~/.omlx/models/mlx-community/Qwen3.6-35B-A3B-6bit` (so the served id matches `opencode.json`); `bge-m3` (embeddings) is `mlx-community/bge-m3-mlx-fp16` downloaded into `~/.omlx/models/bge-m3`.
+- **Models** live under `~/.omlx/models/` as MLX-format subdirectories. The Qwen weights are exposed by symlinking the HF cache snapshot to `~/.omlx/models/mlx-community/<name>` (so the served id matches `opencode.json`); `bge-m3` (embeddings) is `mlx-community/bge-m3-mlx-fp16` downloaded into `~/.omlx/models/bge-m3`. **Auto-download**: on launch `ai.sh`'s `_ensure_model` checks the selected model is present (a `*.safetensors` under its dir) and, if not, runs `hf download <id>` (using the oMLX venv's `hf`/`huggingface-cli`) then symlinks the resulting snapshot into place — so `ai` and `ai -light` fetch their weights on first use instead of failing lazily. Idempotent once the weights exist.
 
 ## Server Tuning
 

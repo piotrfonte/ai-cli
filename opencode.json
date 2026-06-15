@@ -22,6 +22,14 @@
             "context": 49152,
             "output": 8192
           }
+        },
+        "mlx-community/Qwen3.6-35B-A3B-4bit": {
+          "name": "Qwen 3.6 35B-A3B 4-bit (light)",
+          "temperature": false,
+          "limit": {
+            "context": 65536,
+            "output": 8192
+          }
         }
       }
     },

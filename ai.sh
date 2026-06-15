@@ -95,6 +95,16 @@ ai() {
     model_context_limit=65536
   }
 
+  # Same 35B-A3B MoE as the default (3B active params → same decode speed) but at
+  # 4-bit instead of 6-bit: ~20 GB resident vs ~27.5 GB. The freed memory means the
+  # Metal-cap throttling that forced the 6-bit down to 49 k doesn't bind, so
+  # opencode.json advertises a larger 65 k window.
+  _model_qwen_light() {
+    model_id="mlx-community/Qwen3.6-35B-A3B-4bit"
+    model_label="Qwen 3.6 35B-A3B 4-bit (light)"
+    model_context_limit=65536
+  }
+
   local oc_provider="mlx"
 
   # ── Helpers ──────────────────────────────────────────────────────────
@@ -260,15 +270,75 @@ ai() {
     printf "  ${c_bold}Usage:${c_reset}  ai.sh [OPTIONS] [-- frontend-args...]\n"
     echo ""
     printf "  ${c_bold}Options:${c_reset}\n"
-    printf "    ${c_cyan}-ooz, --ooz${c_reset}          Tunnel to the OOZ remote endpoint\n"
-    printf "    ${c_cyan}-cc,  --claude-code${c_reset}  Launch Claude Code on local oMLX ${c_dim}(experimental)${c_reset}\n"
-    printf "    ${c_cyan}-k,   --kill${c_reset}         Kill the oMLX server and OOZ tunnel\n"
-    printf "    ${c_cyan}-h,   --help${c_reset}         Show this help\n"
+    printf "    ${c_cyan}-light, --light${c_reset}      Use the lighter Qwen 3.6 35B-A3B 4-bit model\n"
+    printf "    ${c_cyan}-ooz,   --ooz${c_reset}        Tunnel to the OOZ remote endpoint\n"
+    printf "    ${c_cyan}-cc,    --claude-code${c_reset} Launch Claude Code on local oMLX ${c_dim}(experimental)${c_reset}\n"
+    printf "    ${c_cyan}-k,     --kill${c_reset}       Kill the oMLX server and OOZ tunnel\n"
+    printf "    ${c_cyan}-h,     --help${c_reset}       Show this help\n"
     echo ""
     printf "  ${c_bold}Model:${c_reset}\n"
-    printf "    ${c_dim}Qwen 3.6 35B-A3B 6-bit (local)${c_reset}\n"
+    printf "    ${c_dim}Qwen 3.6 35B-A3B 6-bit (local, default)${c_reset}\n"
+    printf "    ${c_dim}Qwen 3.6 35B-A3B 4-bit (local, via -light)${c_reset}\n"
     printf "    ${c_dim}remote model via -ooz (auto-detected)${c_reset}\n"
     echo ""
+  }
+
+  # ── Ensure the selected model is on disk ─────────────────────────────
+  # oMLX lazily loads weights from --model-dir on the first request, so a model
+  # that isn't downloaded yet would only fail at that point. We pull it eagerly
+  # here (before the server starts) following the existing layout: download into
+  # the HF cache, then symlink the snapshot into ~/.omlx/models/mlx-community/<name>
+  # (matching how the 35B is exposed). Idempotent — a no-op once the weights exist.
+  _ensure_model() {
+    local target="${omlx_model_dir}/${model_id}"
+    if [[ -e "$target" ]] && compgen -G "${target}/*.safetensors" >/dev/null 2>&1; then
+      return 0
+    fi
+
+    # Resolve a Hugging Face downloader — prefer the oMLX venv's, then PATH.
+    local hf_bin=""
+    for cand in \
+      "$(dirname "$omlx_bin")/hf" \
+      "$(dirname "$omlx_bin")/huggingface-cli" \
+      "$(command -v hf 2>/dev/null)" \
+      "$(command -v huggingface-cli 2>/dev/null)"; do
+      if [[ -n "$cand" && -x "$cand" ]]; then hf_bin="$cand"; break; fi
+    done
+    if [[ -z "$hf_bin" ]]; then
+      _err "No Hugging Face downloader (hf/huggingface-cli) found"
+      _info "Expected in the oMLX venv: ${c_dim}${HOME}/.omlx/venv/bin/hf${c_reset}"
+      return 1
+    fi
+
+    echo ""
+    _box_top
+    _box_line " ${c_bold}Downloading model${c_reset}"
+    _box_mid
+    _box_line " ${c_dim}${model_id}${c_reset}"
+    _box_line " ${c_dim}one-time download (~16 GB) — progress below${c_reset}"
+    _box_bottom
+    echo ""
+
+    # hf/huggingface-cli streams progress to stderr and prints the resolved
+    # snapshot path to stdout as its last line; capture that, let progress through.
+    # The hf 1.x CLI (huggingface_hub >=1.0) prefixes the path line with "path=" —
+    # we strip it below; older CLIs print the bare path, so the strip is a no-op
+    # there. HF_XET_HIGH_PERFORMANCE enables the fast Xet transfer backend (the
+    # old HF_HUB_ENABLE_HF_TRANSFER is deprecated in 1.x and only emits a warning).
+    local snapshot
+    snapshot=$(HF_XET_HIGH_PERFORMANCE=1 "$hf_bin" download "$model_id" | tail -1) || {
+      _err "Download failed for ${model_id}"
+      return 1
+    }
+    snapshot="${snapshot#path=}"   # hf 1.x prints "path=<dir>"; older CLIs bare
+    if [[ -z "$snapshot" || ! -d "$snapshot" ]]; then
+      _err "Download did not yield a snapshot directory"
+      return 1
+    fi
+
+    mkdir -p "$(dirname "$target")"
+    ln -sfn "$snapshot" "$target"
+    _ok "Model ready ${c_dim}(${target})${c_reset}"
   }
 
   # ── Start inference server ────────────────────────────────────────────
@@ -417,6 +487,7 @@ ai() {
   # ── Main logic ───────────────────────────────────────────────────────
   local action=""               # "" | "kill" | "help"
   local mode="local"            # "local" | "ooz" | "cc"
+  local profile="default"       # "default" (35B-A3B 6-bit) | "light" (35B-A3B 4-bit)
   local -a passthrough_args=()
 
   while [[ $# -gt 0 ]]; do
@@ -437,6 +508,10 @@ ai() {
         mode="cc"
         shift
         ;;
+      -light|--light)
+        profile="light"
+        shift
+        ;;
       --)
         shift
         passthrough_args=("$@")
@@ -451,7 +526,10 @@ ai() {
   done
 
   # ── Select model profile (local default) ─────────────────────────────
-  _model_qwen
+  case "$profile" in
+    light) _model_qwen_light ;;
+    *)     _model_qwen ;;
+  esac
   local oc_model="$model_id"
 
   case "$action" in
@@ -478,6 +556,10 @@ ai() {
     _ok "Remote model: ${c_bold}${oc_model}${c_reset}"
   else
     _reap_orphan_mcps
+
+    # Pull the selected model eagerly so the server never lazy-fails on a
+    # missing download (and so `-light`'s first run fetches the 35B-A3B-4bit weights).
+    _ensure_model || return 1
 
     # ── Server management ──────────────────────────────────────────────
     local running_pid
@@ -552,6 +634,29 @@ ai() {
     [[ -e "${HOME}/.config/opencode/opencode-mem.jsonc" ]] || \
       _info "Symlink config: ${c_dim}ln -sf ${ai_dir}/opencode-mem.jsonc ~/.config/opencode/opencode-mem.jsonc${c_reset}"
     command -v node >/dev/null 2>&1 || _info "node not found — the plugin needs Node/Bun"
+  fi
+
+  # ── Post-edit lint/typecheck plugin ────────────────────────────────
+  # Deterministic enforcement: opencode's tool.execute.after hook runs ESLint +
+  # tsc + Prettier after every edit and *throws* remaining errors back into the
+  # agent loop, so the model can't leave broken code behind (prompt-level rules
+  # get skipped, especially by the local 35B model). opencode auto-loads any file
+  # in ~/.config/opencode/plugins/ at startup (note: directory is plural — the
+  # singular "plugin" key in opencode.json is the npm-package array, a different
+  # thing). We keep the global symlink current (idempotent — re-pointed on every
+  # launch so it can't drift) and clean up the old singular-dir symlink from
+  # earlier builds. Auto-skips projects without ESLint/tsconfig/Prettier.
+  # NOTE: opencode loads plugins only at startup — restart opencode to pick up
+  # changes to this plugin. See plugins/post-edit-check.js.
+  local lint_src="${ai_dir}/plugins/post-edit-check.js"
+  local lint_dst="${HOME}/.config/opencode/plugins/post-edit-check.js"
+  rm -f "${HOME}/.config/opencode/plugin/post-edit-check.js" 2>/dev/null  # old wrong (singular) path
+  if [[ -f "$lint_src" ]]; then
+    mkdir -p "${HOME}/.config/opencode/plugins"
+    ln -sf "$lint_src" "$lint_dst"
+    _ok "post-edit-check active ${c_dim}(ESLint + tsc + Prettier enforced on edit)${c_reset}"
+  else
+    _warn "post-edit-check plugin missing — lint/typecheck not enforced"
   fi
 
   # ── Launch frontend ──────────────────────────────────────────────────
