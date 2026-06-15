@@ -121,6 +121,31 @@ ai() {
     curl -sf --max-time 2 "http://localhost:${server_port}/v1/models" >/dev/null 2>&1
   }
 
+  # Warn if another opencode session is already serving a *different* local model.
+  # oMLX is multi-model and lazy-loads whatever model id a request asks for, so a
+  # lingering opencode from a previous `ai`/`ai -light` run keeps requesting its
+  # model — and oMLX loads it alongside ours. Two ~20-28GB LLMs can't coexist
+  # under the memory guard, so it thrashes (evict/reload) and stalls or 507s
+  # requests mid-turn (the agent "chokes"). Restarting our server can't stop the
+  # other client, so we can only detect the conflict and tell the user to clear
+  # it. Each opencode's command line carries `-m mlx/<id>`, so we know its model.
+  _warn_model_conflict() {
+    [[ "$oc_provider" == "mlx" ]] || return 0   # only the local provider competes for oMLX memory
+    local pid args pmodel conflict=0
+    for pid in $(pgrep -x opencode 2>/dev/null); do
+      args=$(ps -o args= -p "$pid" 2>/dev/null)
+      case "$args" in *" -m "*) ;; *) continue ;; esac
+      pmodel=${args##*-m }; pmodel=${pmodel%% *}; pmodel=${pmodel#mlx/}
+      [[ -n "$pmodel" && "$pmodel" != "$model_id" ]] || continue
+      _warn "Another opencode (PID ${pid}) is serving ${c_bold}${pmodel}${c_reset}"
+      conflict=1
+    done
+    if (( conflict )); then
+      _warn "Two local models would co-reside in oMLX and thrash memory — this is what stalls/507s requests mid-turn."
+      _info "Close that session, then ${c_dim}ai -k${c_reset} before switching models."
+    fi
+  }
+
   _kill_server() {
     rm -f "$state_file"
     local pids_to_kill=""
@@ -588,6 +613,10 @@ ai() {
     else
       _start_server || return 1
     fi
+
+    # Detect a lingering opencode on a different model that would force oMLX to
+    # hold two big LLMs at once (the server restart above can't stop that client).
+    _warn_model_conflict
   fi
 
   # ── RAG check ──────────────────────────────────────────────────────

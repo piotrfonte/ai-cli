@@ -21,10 +21,9 @@
 //   OPENCODE_LINT_ENABLED         (default true)
 //   OPENCODE_LINT_CHECKS          (default "eslint,tsc,prettier")
 //   OPENCODE_LINT_MAX_RETRIES     (default 3)
-//   OPENCODE_LINT_TSC_DEBOUNCE_MS (default 8000)
 //   OPENCODE_LINT_EXTENSIONS      (default ".ts,.tsx,.js,.jsx,.mjs,.cjs")
 
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { dirname, join, resolve, extname, isAbsolute } from "node:path";
 
 // ── config ───────────────────────────────────────────────────────────────────
@@ -196,19 +195,45 @@ export const PostEditCheck = async ({ $ }) => {
         // Always re-run after an edit — every edit is a new state, and any
         // time-based skip risks missing the last edit of a fast burst, which
         // would break the "never leave a fresh type error" guarantee.
+        //
+        // We DON'T run `tsc -p tsconfig.json` directly: if the project uses
+        // project references (references: [...]) — common in monorepos/workspaces
+        // — that aborts with TS6306/TS6053 about the *referenced* projects before
+        // type-checking any source, so the edited file's real errors never
+        // surface and the agent's bug slips through (bundler setups like CRA /
+        // fork-ts-checker avoid this by checking the app as one program). Instead
+        // we run against a generated wrapper config that extends the real one but
+        // clears `references`/`composite`, forcing a plain whole-program check.
+        // Harmless for non-reference projects: `extends` inherits include/exclude
+        // and compilerOptions, and the overrides are no-ops there.
         // --incremental + a cached tsBuildInfoFile keeps repeat runs cheap: only
         // files changed since the last run get re-checked.
-        const tsBuildInfo = join(root, "node_modules", ".cache", "opencode-tsc.tsbuildinfo");
+        const cacheDir = join(root, "node_modules", ".cache");
+        const tsBuildInfo = join(cacheDir, "opencode-tsc.tsbuildinfo");
+        const wrapper = join(cacheDir, "opencode-tsc-check.json");
+        let wrapperOk = false;
+        try {
+          mkdirSync(cacheDir, { recursive: true });
+          writeFileSync(
+            wrapper,
+            JSON.stringify({
+              extends: tsconfigHit.path, // absolute — TS resolves include/exclude relative to the base
+              references: [],
+              compilerOptions: { composite: false, incremental: true, tsBuildInfoFile: tsBuildInfo },
+            }),
+          );
+          wrapperOk = true;
+        } catch {
+          // can't write the wrapper — fall back to the raw project config below
+        }
         const r = await sh(root, [
           ...resolveBin(root, "tsc"),
           "--noEmit",
           "--pretty",
           "false",
-          "--incremental",
-          "--tsBuildInfoFile",
-          tsBuildInfo,
+          ...(wrapperOk ? [] : ["--incremental", "--tsBuildInfoFile", tsBuildInfo]),
           "-p",
-          tsconfigHit.path,
+          wrapperOk ? wrapper : tsconfigHit.path,
         ]);
         const out = r.stdout.toString() + r.stderr.toString();
         const re = /^(?:\x1b\[[0-9;]*m)*(.+?)\((\d+),(\d+)\): error (TS\d+): (.*)$/gm;
