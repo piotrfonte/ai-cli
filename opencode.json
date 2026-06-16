@@ -90,7 +90,8 @@
       "git gc *": "deny",
       "git prune *": "deny"
     },
-    "doom_loop": "allow"
+    "doom_loop": "allow",
+    "task": "ask"
   },
   "mcp": {
     "smart-coding": {

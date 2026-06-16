@@ -11,6 +11,7 @@ A Bash tool (`ai.sh`) that launches a local [oMLX](https://github.com/jundot/oml
 ```bash
 bash ai.sh              # Qwen 3.6 35B-A3B 6-bit (local oMLX) + opencode
 bash ai.sh -light       # Qwen 3.6 35B-A3B 4-bit (lighter local model) + opencode
+bash ai.sh -hybrid      # Local Qwen + manual @advisor cloud-Claude subagent
 bash ai.sh -ooz         # SSH tunnel to the OOZ remote endpoint + opencode
 bash ai.sh -cc          # Claude Code → local oMLX (experimental)
 bash ai.sh -k           # Kill the local server and OOZ tunnel
@@ -23,6 +24,18 @@ source ai.sh && ai      # Source as a function
 
 `ai -light` runs the **Qwen 3.6 35B-A3B at 4-bit** (`mlx-community/Qwen3.6-35B-A3B-4bit`) instead of the default 6-bit — the same A3B MoE (3B active params, so the same decode speed), just lower precision. It's ~20 GB resident vs ~27.5 GB, so it loads faster and leaves more memory headroom — enough that the Metal-cap throttling which caps the 6-bit at 49 k context doesn't bind, so its `opencode.json` window is a larger 65 k. The weights are **auto-downloaded on first use** (see below); the model id is declared in `opencode.json` under provider `mlx`. Combine with `-cc` to point Claude Code at it; `-light` is ignored under `-ooz` (that path uses the remote model).
 
+### `-hybrid` cloud advisor mode
+
+`ai -hybrid` keeps the local Qwen as the primary coding agent but adds a **read-only, prompt-only cloud-Claude advisor** you summon by hand with `@advisor`. The bulk of the work stays on-box; only the snippet/question you explicitly hand the advisor leaves the machine, for a real cloud-Opus second opinion on a hard architectural call or a correctness/security review. It layers on the default local opencode path (and works under `-ooz`); it is **ignored under `-cc`** (that path launches `claude`, not opencode, and owns the `ANTHROPIC_*` env vars). Requires a one-time `opencode auth login` → Anthropic (OAuth, uses your Claude plan — **no API key, no per-token bill**); `ai -hybrid` warns if that login is missing.
+
+Three independent privacy controls (defense in depth):
+
+1. **Gating** — the advisor agent (`agents/advisor.md`) is symlinked into `~/.config/opencode/agents/` **only** under `-hybrid`; every non-hybrid launch *removes* it, so a plain `ai` has no agent referencing the `anthropic` provider and therefore **no egress path to the cloud at all**.
+2. **Manual** — `opencode.json` sets `permission.task: "ask"`, so even if the local model tries to delegate to the advisor, opencode prompts before anything leaves the box. The advisor is `mode: subagent` (never the primary), invoked via `@advisor`.
+3. **Prompt-only** — `advisor.md` denies **every** tool (`read`/`grep`/`glob`/`bash`/`edit`/`write`/…), so the advisor can reason only about the text you hand it — it cannot open files to widen the egress.
+
+The advisor runs on opencode's **built-in `anthropic` provider** (real `api.anthropic.com`), pinned to `anthropic/claude-opus-4-8` — this is **not** the local oMLX Anthropic endpoint that `-cc` uses. Every advisor call is recorded by `plugins/advisor-egress-log.js` (see Post-edit checks for the plugin-loading mechanism) to **`logs/advisor-egress.jsonl`** — one append-only JSON line per call (`ts`, `sessionID`, full outbound `prompt`). It's named `.jsonl`, not `.log`, on purpose: `ai.sh` prunes `logs/*.log` older than 14 days and an audit trail must outlive that. `ai.sh` passes the path to the plugin via `ADVISOR_EGRESS_LOG` (derived from `AI_LOG_DIR`); the egress plugin is symlinked in only under `-hybrid` and removed otherwise, alongside the agent.
+
 ### `-cc` Claude Code mode
 
 `ai -cc` ensures the local oMLX server is up, then launches Claude Code with `ANTHROPIC_BASE_URL=http://127.0.0.1:10081`, a dummy `ANTHROPIC_API_KEY`, and `ANTHROPIC_MODEL`/`ANTHROPIC_SMALL_FAST_MODEL` set to the served Qwen id — so Claude Code talks to oMLX's Anthropic-compatible `/v1/messages` while believing it's Anthropic. Experimental: Qwen's tool-call format differs from Anthropic's; oMLX adapts it, but behaviour is less battle-tested than the opencode path.
@@ -30,6 +43,31 @@ source ai.sh && ai      # Source as a function
 ### `-ooz` remote mode
 
 `ai -ooz` skips the local oMLX server. It opens an SSH tunnel (`ssh -f -N -C -L <local>:<remote> -p <port> <user>@<host>`) forwarding a local port to the remote's OpenAI-compatible server, polls the endpoint until healthy, resolves the model id (`OOZ_MODEL` if set, else auto-detected from `/v1/models`), then launches `opencode -m "ooz/<model-id>"`. The remote currently serves `Qwen3.6-35B-A3B-GGUF:Q8_0`, declared in `opencode.json` under provider `ooz` with a 64k/8k limit. SSH connection details (host, user, port) are **delicate** and live in `ai.env` (gitignored), not in the repo. See the OOZ variables in the Configuration table.
+
+## Validating changes
+
+There is no build step or test framework — this repo is a Bash launcher (`ai.sh`), a
+few opencode plugins (`plugins/*.js`, ESM), agent definitions (`agents/*.md`), and
+idempotent patch scripts (`scripts/*.mjs`). There is no `package.json`; don't reach
+for `npm test`. Validate edits with:
+
+- `bash -n ai.sh` — syntax-check the launcher.
+- `node --check plugins/<file>.js` — syntax-check a plugin.
+- `python3 -m json.tool opencode.json >/dev/null` — validate the opencode config JSON.
+- `opencode agent list` — after editing `agents/*.md` or `opencode.json`, confirm the
+  agent loads and its `model`/permissions resolve without error (e.g. `advisor` shows
+  as `advisor (subagent)`). Custom agents/subagents load from `~/.config/opencode/agents/`.
+- **Unit-test a plugin hook in isolation** (no oMLX, no opencode, no cloud call):
+  `import` the plugin and invoke the returned hook with a synthetic `(input, output)`.
+  The advisor egress logger was validated this way — fire `chat.message` /
+  `tool.execute.before` with a fake `agent:"advisor"` message and assert the log line
+  (and that non-advisor sessions don't write). See `plugins/advisor-egress-log.js`.
+- **Restart to load changes**: opencode loads plugins and agents only at startup, so
+  exit and re-run `ai` to pick up edits to `plugins/*.js`, `agents/*.md`, or symlinks.
+
+The `post-edit-check` plugin (below) runs ESLint/tsc/Prettier on JS/TS edits in the
+*target* projects opencode opens — it cleanly no-ops on this repo (no eslint/tsconfig/
+prettier here).
 
 ## Architecture
 
@@ -43,10 +81,11 @@ source ai.sh && ai      # Source as a function
 2. **RAG**: Checks for `smart-coding-mcp` on launch (auto-indexes via opencode MCP config).
 3. **OOZ tunnel** (`-ooz` only): `_start_tunnel` opens the SSH forward and polls the local port; `_discover_ooz_model` reads the served model id from `/v1/models`; `_kill_tunnel` kills the listener on the local port (only targets `ssh` processes).
 4. **Frontend launch**: After server/endpoint healthy, runs `opencode -m "<provider>/<model-id>"` (`mlx/…` locally, `ooz/…` with `-ooz`; configured via `opencode.json`) in the caller's original `$PWD`. With `-cc` it instead launches `claude` against the local oMLX Anthropic endpoint.
+5. **Hybrid advisor** (`-hybrid` only): symlinks `agents/advisor.md` → `~/.config/opencode/agents/advisor.md` and `plugins/advisor-egress-log.js` → `~/.config/opencode/plugins/`, runs an Anthropic-OAuth preflight warning, and exports `ADVISOR_EGRESS_LOG`. Every **non**-hybrid launch *removes* both symlinks (the airgap guarantee). See the `-hybrid` mode section above.
 
 ### `opencode.json` — OpenCode provider config
 
-Configures two providers: `mlx` (local, port 10081) and `ooz` (remote tunnel, port 8089), both OpenAI-compatible. The `ooz` provider declares `Qwen3.6-35B-A3B-GGUF:Q8_0` (the current remote model); the id passed via `-m` comes from `OOZ_MODEL` or runtime discovery and must match a declared id to pick up its limits. Context limit (64k), output limit (8k), and timeout. Also configures smart-coding-mcp for RAG indexing and enables the `opencode-mem` plugin via the top-level `"plugin"` array. `chrome-devtools` MCP is registered but disabled by default — flip `enabled` to true per-session if browser automation is needed.
+Configures two providers: `mlx` (local, port 10081) and `ooz` (remote tunnel, port 8089), both OpenAI-compatible. The `ooz` provider declares `Qwen3.6-35B-A3B-GGUF:Q8_0` (the current remote model); the id passed via `-m` comes from `OOZ_MODEL` or runtime discovery and must match a declared id to pick up its limits. Context limit (64k), output limit (8k), and timeout. Also configures smart-coding-mcp for RAG indexing and enables the `opencode-mem` plugin via the top-level `"plugin"` array. `chrome-devtools` MCP is registered but disabled by default — flip `enabled` to true per-session if browser automation is needed. A third provider, `anthropic` (real cloud Claude), is **not** declared here — it's opencode's built-in and resolves via `opencode auth login`; only the `-hybrid` advisor agent references it. The top-level `permission.task: "ask"` enforces the advisor's manual-only rule (see `-hybrid` mode).
 
 ### Memory — `opencode-mem` plugin (`opencode-mem.jsonc`)
 

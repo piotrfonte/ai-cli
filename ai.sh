@@ -296,6 +296,7 @@ ai() {
     echo ""
     printf "  ${c_bold}Options:${c_reset}\n"
     printf "    ${c_cyan}-light, --light${c_reset}      Use the lighter Qwen 3.6 35B-A3B 4-bit model\n"
+    printf "    ${c_cyan}-hybrid,--hybrid${c_reset}     Enable the cloud-Claude ${c_bold}@advisor${c_reset} subagent ${c_dim}(manual, prompt-only)${c_reset}\n"
     printf "    ${c_cyan}-ooz,   --ooz${c_reset}        Tunnel to the OOZ remote endpoint\n"
     printf "    ${c_cyan}-cc,    --claude-code${c_reset} Launch Claude Code on local oMLX ${c_dim}(experimental)${c_reset}\n"
     printf "    ${c_cyan}-k,     --kill${c_reset}       Kill the oMLX server and OOZ tunnel\n"
@@ -513,6 +514,7 @@ ai() {
   local action=""               # "" | "kill" | "help"
   local mode="local"            # "local" | "ooz" | "cc"
   local profile="default"       # "default" (35B-A3B 6-bit) | "light" (35B-A3B 4-bit)
+  local hybrid=0                # 1 = enable the cloud-Claude @advisor subagent (-hybrid)
   local -a passthrough_args=()
 
   while [[ $# -gt 0 ]]; do
@@ -535,6 +537,10 @@ ai() {
         ;;
       -light|--light)
         profile="light"
+        shift
+        ;;
+      -hybrid|--hybrid)
+        hybrid=1
         shift
         ;;
       --)
@@ -688,6 +694,57 @@ ai() {
     _warn "post-edit-check plugin missing — lint/typecheck not enforced"
   fi
 
+  # ── Hybrid cloud advisor (-hybrid) ─────────────────────────────────────
+  # A read-only, prompt-only cloud-Claude subagent the local model never auto-
+  # calls — you summon it by hand with @advisor (see agents/advisor.md). Three
+  # independent privacy controls:
+  #   1. GATING — the agent file is symlinked in ONLY under -hybrid; otherwise it
+  #      is removed, so plain `ai` has no agent referencing the anthropic provider
+  #      and thus no egress path at all. We remove it on every non-hybrid launch so
+  #      a stale symlink can't silently re-open the cloud path.
+  #   2. MANUAL — opencode.json sets permission.task:"ask", so even if the local
+  #      model tries to delegate to the advisor, opencode prompts before anything
+  #      leaves the box. The advisor is mode:subagent (never the primary).
+  #   3. PROMPT-ONLY — advisor.md denies every tool, so the advisor can only reason
+  #      about the text you hand it; it can't open files to widen the egress.
+  # Every advisor call is recorded by plugins/advisor-egress-log.js to
+  # logs/advisor-egress.jsonl (named .jsonl so the logs/*.log prune can't delete
+  # the audit trail). The advisor runs on REAL cloud Claude via opencode's built-in
+  # anthropic provider + your `opencode auth login` OAuth — it is NOT the local
+  # oMLX Anthropic endpoint that -cc uses, so -hybrid only applies to the opencode
+  # frontend (it's ignored under -cc, which owns the ANTHROPIC_* env vars).
+  local advisor_src="${ai_dir}/agents/advisor.md"
+  local advisor_dst="${HOME}/.config/opencode/agents/advisor.md"
+  local egress_src="${ai_dir}/plugins/advisor-egress-log.js"
+  local egress_dst="${HOME}/.config/opencode/plugins/advisor-egress-log.js"
+  local advisor_egress_log=""
+  if [[ "$hybrid" == "1" && "$mode" == "cc" ]]; then
+    _warn "-hybrid is ignored under -cc (the advisor needs the opencode frontend)"
+    hybrid=0
+  fi
+  if [[ "$hybrid" == "1" ]]; then
+    if [[ -f "$advisor_src" && -f "$egress_src" ]]; then
+      mkdir -p "${HOME}/.config/opencode/agents" "${HOME}/.config/opencode/plugins" "$ai_log_dir"
+      ln -sf "$advisor_src" "$advisor_dst"
+      ln -sf "$egress_src" "$egress_dst"
+      advisor_egress_log="${ai_log_dir}/advisor-egress.jsonl"
+      # OAuth preflight — warn (don't block) if Anthropic isn't logged in; the
+      # advisor will just error until `opencode auth login` is run once.
+      if ! grep -q '"anthropic"' "${HOME}/.local/share/opencode/auth.json" 2>/dev/null; then
+        _warn "Anthropic OAuth not found — @advisor will fail until you log in"
+        _info "Run once: ${c_dim}opencode auth login${c_reset} → Anthropic (uses your Claude plan, no API key)"
+      fi
+      _ok "@advisor enabled ${c_dim}(cloud Opus, manual + prompt-only; egress → ${advisor_egress_log})${c_reset}"
+    else
+      _warn "-hybrid requested but advisor files missing — advisor not enabled"
+      rm -f "$advisor_dst" "$egress_dst" 2>/dev/null
+    fi
+  else
+    # Airgap guarantee: ensure no advisor/egress plumbing lingers from a prior
+    # -hybrid run, so a plain `ai` provably has no path to the cloud.
+    rm -f "$advisor_dst" "$egress_dst" 2>/dev/null
+  fi
+
   # ── Launch frontend ──────────────────────────────────────────────────
   echo ""
   cd "$caller_dir" || return 1
@@ -709,6 +766,9 @@ ai() {
 
   _info "Launching ${c_bold}opencode${c_reset} with ${c_bold}${oc_provider}/${oc_model}${c_reset}"
   echo ""
+  # ADVISOR_EGRESS_LOG is empty unless -hybrid enabled the advisor; the egress-log
+  # plugin (only symlinked under -hybrid) reads it to record what's sent to @advisor.
+  ADVISOR_EGRESS_LOG="$advisor_egress_log" \
   opencode -m "${oc_provider}/${oc_model}" "${passthrough_args[@]}"
   return $?
 }
