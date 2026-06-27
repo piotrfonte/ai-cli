@@ -89,19 +89,28 @@ ai() {
   # ── Model profile ────────────────────────────────────────────────────
   # model_id must match a model oMLX serves from --model-dir (the two-level
   # mlx-community/<name> form is accepted) AND the id keyed in opencode.json.
+  # Default: Qwen 3.6 35B-A3B in oMLX's native oQ6 quant (data-driven mixed
+  # precision) with MTP heads preserved (-mtp). MTP (multi-token prediction /
+  # speculative decode) is OFF by default in oMLX and is enabled per-model via
+  # ~/.omlx/model_settings.json — ai.sh writes that key on launch (see
+  # scripts/patch-omlx-mtp.mjs). ~30 GB resident, so the worst-case KV stays
+  # under the Metal working-set cap only at ~40 k context (see opencode.json).
   _model_qwen() {
-    model_id="mlx-community/Qwen3.6-35B-A3B-6bit"
-    model_label="Qwen 3.6 35B-A3B 6-bit"
-    model_context_limit=65536
+    model_id="Jundot/Qwen3.6-35B-A3B-oQ6-mtp"
+    model_label="Qwen 3.6 35B-A3B oQ6 +MTP"
+    model_context_limit=40960
   }
 
-  # Same 35B-A3B MoE as the default (3B active params → same decode speed) but at
-  # 4-bit instead of 6-bit: ~20 GB resident vs ~27.5 GB. The freed memory means the
-  # Metal-cap throttling that forced the 6-bit down to 49 k doesn't bind, so
-  # opencode.json advertises a larger 65 k window.
-  _model_qwen_light() {
-    model_id="mlx-community/Qwen3.6-35B-A3B-4bit"
-    model_label="Qwen 3.6 35B-A3B 4-bit (light)"
+  # Opt-in via -qwopus: "Qwopus" — Qwen3.5-27B distilled on Claude Opus 4.6
+  # reasoning chains, MLX 6-bit (~20 GB resident). A dense <think> CoT *reasoning*
+  # model, NOT the everyday A3B coder — slower per token, thinks before answering;
+  # reach for it on hard problems. reasoning_parser=qwen is set for it in
+  # ~/.omlx/model_settings.json (same patch script) so oMLX splits the <think>
+  # block into reasoning_content instead of leaving raw tags inline in the chat.
+  # opencode-only — see the -cc guard in main logic.
+  _model_qwopus() {
+    model_id="mlx-community/Qwen3.5-27B-Claude-4.6-Opus-Distilled-MLX-6bit"
+    model_label="Qwopus 6-bit (Opus-distilled reasoning)"
     model_context_limit=65536
   }
 
@@ -123,7 +132,7 @@ ai() {
 
   # Warn if another opencode session is already serving a *different* local model.
   # oMLX is multi-model and lazy-loads whatever model id a request asks for, so a
-  # lingering opencode from a previous `ai`/`ai -light` run keeps requesting its
+  # lingering opencode from a previous `ai`/`ai -qwopus` run keeps requesting its
   # model — and oMLX loads it alongside ours. Two ~20-28GB LLMs can't coexist
   # under the memory guard, so it thrashes (evict/reload) and stalls or 507s
   # requests mid-turn (the agent "chokes"). Restarting our server can't stop the
@@ -295,7 +304,7 @@ ai() {
     printf "  ${c_bold}Usage:${c_reset}  ai.sh [OPTIONS] [-- frontend-args...]\n"
     echo ""
     printf "  ${c_bold}Options:${c_reset}\n"
-    printf "    ${c_cyan}-light, --light${c_reset}      Use the lighter Qwen 3.6 35B-A3B 4-bit model\n"
+    printf "    ${c_cyan}-qwopus,--qwopus${c_reset}     Use the Qwopus 6-bit Opus-distilled reasoning model ${c_dim}(opencode only)${c_reset}\n"
     printf "    ${c_cyan}-hybrid,--hybrid${c_reset}     Enable the cloud-Claude ${c_bold}@advisor${c_reset} subagent ${c_dim}(manual, prompt-only)${c_reset}\n"
     printf "    ${c_cyan}-ooz,   --ooz${c_reset}        Tunnel to the OOZ remote endpoint\n"
     printf "    ${c_cyan}-cc,    --claude-code${c_reset} Launch Claude Code on local oMLX ${c_dim}(experimental)${c_reset}\n"
@@ -303,8 +312,8 @@ ai() {
     printf "    ${c_cyan}-h,     --help${c_reset}       Show this help\n"
     echo ""
     printf "  ${c_bold}Model:${c_reset}\n"
-    printf "    ${c_dim}Qwen 3.6 35B-A3B 6-bit (local, default)${c_reset}\n"
-    printf "    ${c_dim}Qwen 3.6 35B-A3B 4-bit (local, via -light)${c_reset}\n"
+    printf "    ${c_dim}Qwen 3.6 35B-A3B oQ6 +MTP (local, default)${c_reset}\n"
+    printf "    ${c_dim}Qwopus 6-bit Opus-distilled reasoning (local, via -qwopus)${c_reset}\n"
     printf "    ${c_dim}remote model via -ooz (auto-detected)${c_reset}\n"
     echo ""
   }
@@ -341,22 +350,39 @@ ai() {
     _box_line " ${c_bold}Downloading model${c_reset}"
     _box_mid
     _box_line " ${c_dim}${model_id}${c_reset}"
-    _box_line " ${c_dim}one-time download (~16 GB) — progress below${c_reset}"
+    _box_line " ${c_dim}one-time download (20–30 GB) — progress below${c_reset}"
     _box_bottom
     echo ""
 
-    # hf/huggingface-cli streams progress to stderr and prints the resolved
-    # snapshot path to stdout as its last line; capture that, let progress through.
-    # The hf 1.x CLI (huggingface_hub >=1.0) prefixes the path line with "path=" —
-    # we strip it below; older CLIs print the bare path, so the strip is a no-op
-    # there. HF_XET_HIGH_PERFORMANCE enables the fast Xet transfer backend (the
-    # old HF_HUB_ENABLE_HF_TRANSFER is deprecated in 1.x and only emits a warning).
-    local snapshot
-    snapshot=$(HF_XET_HIGH_PERFORMANCE=1 "$hf_bin" download "$model_id" | tail -1) || {
+    # hf prints the resolved snapshot path to stdout as a "path=<dir>" line (hf 1.x;
+    # older CLIs print a bare path). HF_XET_HIGH_PERFORMANCE enables the fast Xet
+    # transfer backend (the old HF_HUB_ENABLE_HF_TRANSFER is deprecated in 1.x).
+    # NOTE: the Xet backend also writes progress lines ("Fetching N files",
+    # "Download complete") to *stdout*, and they can TRAIL the path= line — so a
+    # naive `tail -1` grabs a progress line instead of the path (and tqdm uses \r,
+    # not \n, between updates). We capture stdout (letting per-file progress on
+    # stderr through to the terminal), split on \r, and pull the path= line. If
+    # that yields nothing usable we fall back to resolving the snapshot straight
+    # from the HF cache layout (refs/main → snapshots/<rev>), which is immune to
+    # any output-format drift. Capturing without a pipe also lets `||` see hf's
+    # real exit status (a piped `| tail` would mask a download failure).
+    local raw
+    raw=$(HF_XET_HIGH_PERFORMANCE=1 "$hf_bin" download "$model_id") || {
       _err "Download failed for ${model_id}"
       return 1
     }
-    snapshot="${snapshot#path=}"   # hf 1.x prints "path=<dir>"; older CLIs bare
+    local snapshot
+    snapshot=$(printf '%s' "$raw" | tr '\r' '\n' | sed -n 's/^path=//p' | tail -1)
+    [[ -n "$snapshot" && -d "$snapshot" ]] || snapshot=$(printf '%s' "$raw" | tr '\r' '\n' | grep -v '=' | tail -1)
+    if [[ -z "$snapshot" || ! -d "$snapshot" ]]; then
+      # Fallback: deterministic HF cache layout. hf stores repo <ns>/<name> at
+      # <hub>/models--<ns>--<name>/snapshots/<rev>, with refs/main holding <rev>.
+      local hub="${HF_HUB_CACHE:-${HF_HOME:-${HOME}/.cache/huggingface}/hub}"
+      local repo_dir="${hub}/models--${model_id//\//--}"
+      local rev=""
+      [[ -f "${repo_dir}/refs/main" ]] && IFS= read -r rev < "${repo_dir}/refs/main"
+      [[ -n "$rev" ]] && snapshot="${repo_dir}/snapshots/${rev}"
+    fi
     if [[ -z "$snapshot" || ! -d "$snapshot" ]]; then
       _err "Download did not yield a snapshot directory"
       return 1
@@ -513,7 +539,7 @@ ai() {
   # ── Main logic ───────────────────────────────────────────────────────
   local action=""               # "" | "kill" | "help"
   local mode="local"            # "local" | "ooz" | "cc"
-  local profile="default"       # "default" (35B-A3B 6-bit) | "light" (35B-A3B 4-bit)
+  local profile="default"       # "default" (35B-A3B oQ6 +MTP) | "qwopus" (Qwen3.5-27B Opus-distilled 6-bit)
   local hybrid=0                # 1 = enable the cloud-Claude @advisor subagent (-hybrid)
   local -a passthrough_args=()
 
@@ -535,8 +561,8 @@ ai() {
         mode="cc"
         shift
         ;;
-      -light|--light)
-        profile="light"
+      -qwopus|--qwopus)
+        profile="qwopus"
         shift
         ;;
       -hybrid|--hybrid)
@@ -558,8 +584,8 @@ ai() {
 
   # ── Select model profile (local default) ─────────────────────────────
   case "$profile" in
-    light) _model_qwen_light ;;
-    *)     _model_qwen ;;
+    qwopus) _model_qwopus ;;
+    *)      _model_qwen ;;
   esac
   local oc_model="$model_id"
 
@@ -567,6 +593,15 @@ ai() {
     help) _show_help; return 0 ;;
     kill) _kill_server; _kill_tunnel; return 0 ;;
   esac
+
+  # Qwopus is a reasoning model on the opencode path only — its <think>/
+  # reasoning_content mapping onto Claude Code's Anthropic format is untested, so
+  # refuse the combo rather than silently downgrade to the default model.
+  if [[ "$mode" == "cc" && "$profile" == "qwopus" ]]; then
+    _err "-qwopus is opencode-only and can't be combined with -cc"
+    _info "Run ${c_dim}ai -qwopus${c_reset} (opencode) or ${c_dim}ai -cc${c_reset} (default model) separately"
+    return 1
+  fi
 
   _check_deps || return 1
 
@@ -589,8 +624,20 @@ ai() {
     _reap_orphan_mcps
 
     # Pull the selected model eagerly so the server never lazy-fails on a
-    # missing download (and so `-light`'s first run fetches the 35B-A3B-4bit weights).
+    # missing download (so a first `ai` fetches the oQ6-mtp default and a first
+    # `ai -qwopus` fetches the Qwopus 6-bit weights).
     _ensure_model || return 1
+
+    # Enable per-model oMLX settings that aren't server CLI flags: MTP
+    # (multi-token prediction) for the oQ6-mtp default and reasoning_parser for
+    # Qwopus. These live in ~/.omlx/model_settings.json, which oMLX reads at model
+    # load — so a running server must be restarted to pick up a change (the
+    # model-switch restart below handles the common case). Idempotent merge: it
+    # only writes when a value differs, and never clobbers other models/keys.
+    local omlx_base_dir="${OMLX_BASE_DIR:-${HOME}/.omlx}"
+    if command -v node >/dev/null 2>&1 && [[ -f "${ai_dir}/scripts/patch-omlx-mtp.mjs" ]]; then
+      node "${ai_dir}/scripts/patch-omlx-mtp.mjs" "${omlx_base_dir}/model_settings.json" >/dev/null 2>&1
+    fi
 
     # ── Server management ──────────────────────────────────────────────
     local running_pid

@@ -4,13 +4,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Is
 
-A Bash tool (`ai.sh`) that launches a local [oMLX](https://github.com/jundot/omlx) inference server and connects [opencode](https://opencode.ai) (the sst/opencode build) to it. The local model is Qwen 3.6 35B-A3B 6-bit (or, with `-light`, the same MoE at 4-bit: Qwen 3.6 35B-A3B 4-bit). oMLX is a native Apple-Silicon server whose two-tier KV cache (hot RAM + cold SSD) restores recurring prompt prefixes from disk instead of recomputing them, collapsing agentic time-to-first-token from ~30s to ~1s, and it serves the LLM **and** the embedding model (bge-m3) from one process with continuous batching. opencode has persistent cross-session memory via the `opencode-mem` plugin (local SQLite; embeddings + summarizer run on oMLX — see the Memory section). With `-ooz`, it instead opens an SSH tunnel to a remote OpenAI-compatible endpoint; with `-cc`, it points Claude Code at the local oMLX Anthropic endpoint. Designed for Apple Silicon Macs (M4 Max with 64GB RAM assumed).
+A Bash tool (`ai.sh`) that launches a local [oMLX](https://github.com/jundot/omlx) inference server and connects [opencode](https://opencode.ai) (the sst/opencode build) to it. The local model is Qwen 3.6 35B-A3B in oMLX's native **oQ6** quant with MTP speculative decode (or, with `-qwopus`, a Claude-Opus-distilled reasoning model: Qwen3.5-27B at 6-bit). oMLX is a native Apple-Silicon server whose two-tier KV cache (hot RAM + cold SSD) restores recurring prompt prefixes from disk instead of recomputing them, collapsing agentic time-to-first-token from ~30s to ~1s, and it serves the LLM **and** the embedding model (bge-m3) from one process with continuous batching. opencode has persistent cross-session memory via the `opencode-mem` plugin (local SQLite; embeddings + summarizer run on oMLX — see the Memory section). With `-ooz`, it instead opens an SSH tunnel to a remote OpenAI-compatible endpoint; with `-cc`, it points Claude Code at the local oMLX Anthropic endpoint. Designed for Apple Silicon Macs (M4 Max with 64GB RAM assumed).
 
 ## Usage
 
 ```bash
-bash ai.sh              # Qwen 3.6 35B-A3B 6-bit (local oMLX) + opencode
-bash ai.sh -light       # Qwen 3.6 35B-A3B 4-bit (lighter local model) + opencode
+bash ai.sh              # Qwen 3.6 35B-A3B oQ6 +MTP (local oMLX) + opencode
+bash ai.sh -qwopus      # Qwopus: Qwen3.5-27B Opus-distilled reasoning 6-bit + opencode
 bash ai.sh -hybrid      # Local Qwen + manual @advisor cloud-Claude subagent
 bash ai.sh -ooz         # SSH tunnel to the OOZ remote endpoint + opencode
 bash ai.sh -cc          # Claude Code → local oMLX (experimental)
@@ -20,9 +20,19 @@ bash ai.sh -- --flag    # Pass args through to the frontend
 source ai.sh && ai      # Source as a function
 ```
 
-### `-light` lighter local model
+### Default model — Qwen 3.6 35B-A3B oQ6 +MTP
 
-`ai -light` runs the **Qwen 3.6 35B-A3B at 4-bit** (`mlx-community/Qwen3.6-35B-A3B-4bit`) instead of the default 6-bit — the same A3B MoE (3B active params, so the same decode speed), just lower precision. It's ~20 GB resident vs ~27.5 GB, so it loads faster and leaves more memory headroom — enough that the Metal-cap throttling which caps the 6-bit at 49 k context doesn't bind, so its `opencode.json` window is a larger 65 k. The weights are **auto-downloaded on first use** (see below); the model id is declared in `opencode.json` under provider `mlx`. Combine with `-cc` to point Claude Code at it; `-light` is ignored under `-ooz` (that path uses the remote model).
+The default `ai` runs **`Jundot/Qwen3.6-35B-A3B-oQ6-mtp`** — the same A3B MoE (3B active) as before, but in oMLX's native **oQ6** quant (data-driven mixed-precision: bits allocated where layer-sensitivity calibration says they matter) rather than a flat MLX 6-bit, with the model's **MTP** (multi-token prediction) heads preserved. ~30 GB resident.
+
+**MTP is off by default in oMLX** even when the weights carry MTP heads — it's a per-model setting (`mtp_enabled`), not an `omlx serve` flag. `ai.sh` enables it on launch via `scripts/patch-omlx-mtp.mjs` (see the model_settings.json side-effect below). With it on, oMLX runs a draft+verify speculative-decode loop for **singleton decode when batch rows align** — so a coding turn overlapping the opencode-mem summarizer (the 2nd concurrent slot) falls back to normal decode for that window; the speedup is real but intermittent.
+
+The model is **auto-downloaded on first use** (see Models below) and declared in `opencode.json` under provider `mlx` at a **40,960** context cap (see Context window for why it's lower than the old 49 k).
+
+### `-qwopus` Opus-distilled reasoning model
+
+`ai -qwopus` runs **`mlx-community/Qwen3.5-27B-Claude-4.6-Opus-Distilled-MLX-6bit`** ("Qwopus") — Qwen3.5-27B fine-tuned on Claude Opus 4.6 reasoning chains, at MLX 6-bit (~20 GB resident). Unlike the A3B default it's a **dense** model and a **reasoning** model: it emits a `<think>…</think>` chain before answering, so it's slower per token and spends tokens thinking — reach for it on hard problems, not as the everyday driver. oMLX is configured (same patch script) with `reasoning_parser: "qwen"` for it, so the `<think>` block is surfaced as a separate `reasoning_content` field instead of leaking raw tags inline into the opencode chat. Its `opencode.json` window is **65,536 context / 16,384 output** — the larger output budget gives the CoT room to finish; the 20 GB resident leaves ample KV headroom for the bigger context.
+
+**opencode-only.** `-qwopus` is **refused under `-cc`** (`ai -cc -qwopus` errors out): mapping a reasoning model's `reasoning_content` onto Claude Code's Anthropic format is untested, so the combo is blocked rather than silently downgraded. It is also ignored under `-ooz` (that path uses the remote model). The weights are auto-downloaded on first use.
 
 ### `-hybrid` cloud advisor mode
 
@@ -38,7 +48,7 @@ The advisor runs on opencode's **built-in `anthropic` provider** (real `api.anth
 
 ### `-cc` Claude Code mode
 
-`ai -cc` ensures the local oMLX server is up, then launches Claude Code with `ANTHROPIC_BASE_URL=http://127.0.0.1:10081`, a dummy `ANTHROPIC_API_KEY`, and `ANTHROPIC_MODEL`/`ANTHROPIC_SMALL_FAST_MODEL` set to the served Qwen id — so Claude Code talks to oMLX's Anthropic-compatible `/v1/messages` while believing it's Anthropic. Experimental: Qwen's tool-call format differs from Anthropic's; oMLX adapts it, but behaviour is less battle-tested than the opencode path.
+`ai -cc` ensures the local oMLX server is up, then launches Claude Code with `ANTHROPIC_BASE_URL=http://127.0.0.1:10081`, a dummy `ANTHROPIC_API_KEY`, and `ANTHROPIC_MODEL`/`ANTHROPIC_SMALL_FAST_MODEL` set to the served Qwen id (the oQ6-mtp default) — so Claude Code talks to oMLX's Anthropic-compatible `/v1/messages` while believing it's Anthropic. Experimental: Qwen's tool-call format differs from Anthropic's; oMLX adapts it, but behaviour is less battle-tested than the opencode path. `-cc` uses the default model only — it **refuses `-qwopus`** (see that section).
 
 ### `-ooz` remote mode
 
@@ -52,8 +62,9 @@ idempotent patch scripts (`scripts/*.mjs`). There is no `package.json`; don't re
 for `npm test`. Validate edits with:
 
 - `bash -n ai.sh` — syntax-check the launcher.
-- `node --check plugins/<file>.js` — syntax-check a plugin.
+- `node --check plugins/<file>.js` / `node --check scripts/<file>.mjs` — syntax-check a plugin or patch script.
 - `python3 -m json.tool opencode.json >/dev/null` — validate the opencode config JSON.
+- **Unit-test the oMLX settings patch in isolation**: `node scripts/patch-omlx-mtp.mjs /tmp/ms.json` against a throwaway path and assert the merge — fresh-create, idempotent re-run (no rewrite), preserving a pre-existing model/key, and recovering from a corrupt file. No oMLX needed.
 - `opencode agent list` — after editing `agents/*.md` or `opencode.json`, confirm the
   agent loads and its `model`/permissions resolve without error (e.g. `advisor` shows
   as `advisor (subagent)`). Custom agents/subagents load from `~/.config/opencode/agents/`.
@@ -77,7 +88,7 @@ prettier here).
    - `_start_server` — runs `omlx serve --model-dir … --paged-ssd-cache-dir …` with tuned cache/memory flags (binary resolved via `OMLX_BIN`, default `~/.omlx/venv/bin/omlx`). oMLX discovers models from `--model-dir` subdirectories, so no `--model` is passed; opencode picks the model per request.
    - `_wait_for_server` — polls `/v1/models` with spinner, opens tmux log pane if in tmux
    - `_kill_server` — kills by PID file then port scan (only targets python/mlx/omlx processes — the oMLX process renames itself to `omlx-server`)
-   - On a model switch the server is killed/restarted automatically (state file `$AI_STATE_DIR/omlx-model` vs the requested id). But oMLX is multi-model and lazy-loads whatever id a request asks for, so a **lingering opencode from a previous `ai`/`ai -light` run** keeps requesting its old model and oMLX loads it alongside the new one — two ~20-28GB LLMs can't coexist under the memory guard, so it thrashes (evict/reload) and stalls or `507`s requests mid-turn (the agent "chokes"). `_warn_model_conflict` detects this — it reads each running opencode's `-m mlx/<id>` arg and warns if any differs from the model being launched, pointing the user to close that session and `ai -k`. (ai.sh can't fix it automatically — it can't control the other client.)
+   - On a model switch the server is killed/restarted automatically (state file `$AI_STATE_DIR/omlx-model` vs the requested id). But oMLX is multi-model and lazy-loads whatever id a request asks for, so a **lingering opencode from a previous `ai`/`ai -qwopus` run** keeps requesting its old model and oMLX loads it alongside the new one — two ~20-30GB LLMs can't coexist under the memory guard, so it thrashes (evict/reload) and stalls or `507`s requests mid-turn (the agent "chokes"). `_warn_model_conflict` detects this — it reads each running opencode's `-m mlx/<id>` arg and warns if any differs from the model being launched, pointing the user to close that session and `ai -k`. (ai.sh can't fix it automatically — it can't control the other client.)
 2. **RAG**: Checks for `smart-coding-mcp` on launch (auto-indexes via opencode MCP config).
 3. **OOZ tunnel** (`-ooz` only): `_start_tunnel` opens the SSH forward and polls the local port; `_discover_ooz_model` reads the served model id from `/v1/models`; `_kill_tunnel` kills the listener on the local port (only targets `ssh` processes).
 4. **Frontend launch**: After server/endpoint healthy, runs `opencode -m "<provider>/<model-id>"` (`mlx/…` locally, `ooz/…` with `-ooz`; configured via `opencode.json`) in the caller's original `$PWD`. With `-cc` it instead launches `claude` against the local oMLX Anthropic endpoint.
@@ -126,6 +137,7 @@ Environment variables can be set in `ai.env` or exported before running.
 | `AI_PORT` | `10081` | oMLX server port |
 | `OMLX_BIN` | `~/.omlx/venv/bin/omlx` (else `omlx` on PATH) | oMLX server binary |
 | `OMLX_MODEL_DIR` | `~/.omlx/models` | Dir oMLX discovers models from (subdirectories) |
+| `OMLX_BASE_DIR` | `~/.omlx` | oMLX base path; `$OMLX_BASE_DIR/model_settings.json` is where `patch-omlx-mtp.mjs` writes MTP/reasoning settings |
 | `OMLX_CACHE_DIR` | `~/.omlx/cache` | Paged SSD KV-cache directory |
 | `OMLX_HOT_CACHE` | `8GB` | In-RAM hot KV-cache tier size (model + tier must fit under the memory guard's soft threshold) |
 | `OMLX_SSD_CACHE_MAX` | `40GB` | Disk cap for the paged SSD cache (unset, oMLX claims nearly all free disk) |
@@ -159,7 +171,8 @@ The real `ai.env` is gitignored. `ai.env.example` holds commented placeholders f
 - `opencode` — frontend, sst/opencode (`brew install sst/tap/opencode`)
 - `node` — required by the `opencode-mem` memory plugin (auto-installed by opencode from the `"plugin"` array). On launch `ai.sh` also re-applies `scripts/patch-opencode-mem-cap.mjs` to cap the plugin's summarizer input (idempotent; see the Memory section)
 - `smart-coding-mcp` — for RAG, installed as a **private repo-owned copy** so we can patch it without mutating a shared global: `npm install --prefix ~/.smart-coding-omlx smart-coding-mcp`. `opencode.json` launches it from there. Its in-process Xenova embedder is rerouted to oMLX (`bge-m3`) by `scripts/patch-smart-coding-omlx.mjs`, which `ai.sh` re-applies on every launch (idempotent; survives `npm update` of the copy).
-- **Models** live under `~/.omlx/models/` as MLX-format subdirectories. The Qwen weights are exposed by symlinking the HF cache snapshot to `~/.omlx/models/mlx-community/<name>` (so the served id matches `opencode.json`); `bge-m3` (embeddings) is `mlx-community/bge-m3-mlx-fp16` downloaded into `~/.omlx/models/bge-m3`. **Auto-download**: on launch `ai.sh`'s `_ensure_model` checks the selected model is present (a `*.safetensors` under its dir) and, if not, runs `hf download <id>` (using the oMLX venv's `hf`/`huggingface-cli`) then symlinks the resulting snapshot into place — so `ai` and `ai -light` fetch their weights on first use instead of failing lazily. Idempotent once the weights exist.
+- **Models** live under `~/.omlx/models/` as MLX-format subdirectories. The weights are exposed by symlinking the HF cache snapshot to `~/.omlx/models/<namespace>/<name>` (so the served two-level id matches `opencode.json` — e.g. `Jundot/Qwen3.6-35B-A3B-oQ6-mtp`); `bge-m3` (embeddings) is `mlx-community/bge-m3-mlx-fp16` downloaded into `~/.omlx/models/bge-m3`. **Auto-download**: on launch `ai.sh`'s `_ensure_model` checks the selected model is present (a `*.safetensors` under its dir) and, if not, runs `hf download <id>` (using the oMLX venv's `hf`/`huggingface-cli`) then symlinks the resulting snapshot into place — so `ai` (oQ6-mtp default, ~30 GB) and `ai -qwopus` (Qwopus 6-bit, ~20 GB) fetch their weights on first use instead of failing lazily. Idempotent once the weights exist.
+- **Per-model oMLX settings** live in `~/.omlx/model_settings.json` (oMLX's own store, base path `~/.omlx`), **not** in this repo. On launch `ai.sh` runs `scripts/patch-omlx-mtp.mjs` to merge in `mtp_enabled: true` for the oQ6-mtp default and `reasoning_parser: "qwen"` for Qwopus — settings oMLX reads at **model load**, so a change needs a server restart (`ai -k`; the model-switch restart covers the usual case). The patch is idempotent and non-destructive: it only writes when a value differs and preserves every other model/key (e.g. anything set via the oMLX admin panel). Schema is `{"version":1,"models":{<id>:{…}}}`; oMLX's `ModelSettings.from_dict` filters to known fields and defaults the rest, so the partial entries the script writes are valid. Override the file path with `OMLX_BASE_DIR` (default `~/.omlx`).
 
 ## Server Tuning
 
@@ -167,13 +180,13 @@ oMLX launches with explicit flags (see the `OMLX_*` Configuration vars):
 
 - `--paged-ssd-cache-dir ~/.omlx/cache` — **the headline feature.** Block-based KV cache (vLLM-style, prefix sharing + copy-on-write) with a cold SSD tier; recurring prefixes (system prompt, shared codebase context) are restored from disk on a cache hit — even across a server restart — instead of recomputed. Measured locally: cold prefill ~2.3s → warm ~0.6s on a shared prefix.
 - `--paged-ssd-cache-max-size 40GB` — disk cap for the SSD tier; oMLX evicts LRU within it. Without it oMLX sizes the cache off free disk space and will grow until the disk is nearly full.
-- `--hot-cache-max-size 8GB` — in-RAM hot KV tier (oMLX default is 0/disabled; must be set explicitly). Bigger tier = more in-memory hits before spilling to SSD — but model (~29.5 GB) + tier must stay under the memory guard's **soft threshold (85% of the guard = 40.8 GB at 48)**; at 12 GB the steady state sat above it and the enforcer evicted models mid-request (aborted completions = the agent "choking").
+- `--hot-cache-max-size 8GB` — in-RAM hot KV tier (oMLX default is 0/disabled; must be set explicitly). Bigger tier = more in-memory hits before spilling to SSD — but model (~30 GB for the oQ6-mtp default) + tier must stay under the memory guard's **soft threshold (85% of the guard = 40.8 GB at 48)**; at 12 GB the steady state sat above it and the enforcer evicted models mid-request (aborted completions = the agent "choking").
 - `--memory-guard-gb 48` — hard ceiling oMLX won't exceed, leaving ~16 GB for macOS/apps on a 64 GB machine. Replaces the old `MLX_CACHE_LIMIT`. Raise on 128 GB configs. Eviction starts at the 85% soft threshold, not the ceiling.
 - `--max-concurrent-requests 2` — continuous batching. One slot for the interactive coding turn, one so the opencode-mem summarizer can overlap it instead of serializing. Kept at 2 (not higher) because each concurrent prefill adds transient working memory against the guard's soft threshold; embeddings run on the separate bge-m3 engine and don't compete for these slots.
 
 oMLX auto-tunes the paged-cache block size (e.g. 2048 tokens for the Qwen hybrid model) and reads the model's native context (Qwen3.6 reports 262 144).
 
-**Context window**: opencode advertises **49,152 tokens context / 8,192 output** for the local `mlx` Qwen (`opencode.json`) — conservative vs the native 256 k window. Lowered from 65,536: a full-window coding turn's KV cache, stacked on the resident model (~27.5 GB) and a warm hot-cache prefix preload, transiently spiked total memory past Apple's Metal working-set cap (51.8 GB on this 64 GB machine, since `iogpu.wired_limit_mb` is unset) and oMLX force-killed the prefill (`Memory limit exceeded during prefill`) — the agent "choked." 48 k bounds the worst-case KV so the spike stays under the Metal cap. The remote `ooz` provider stays at 64 k (it runs on a different machine, not subject to this Mac's Metal cap). If you raise `iogpu.wired_limit_mb` (e.g. `sudo sysctl iogpu.wired_limit_mb=57344`), the local limit can go back up.
+**Context window**: opencode advertises **40,960 tokens context / 8,192 output** for the default `mlx` oQ6-mtp Qwen (`opencode.json`) — conservative vs the native 256 k window. A full-window coding turn's KV cache, stacked on the resident model and a warm hot-cache prefix preload, transiently spikes total memory toward Apple's Metal working-set cap (51.8 GB on this 64 GB machine, since `iogpu.wired_limit_mb` is unset); past it oMLX force-kills the prefill (`Memory limit exceeded during prefill`) and the agent "chokes." The old flat-6bit default (~27.5 GB resident) was safe at 49 k; **oQ6-mtp is ~30 GB resident and MTP attaches a draft head with its own verify buffers**, eating ~2.5 GB+ of that KV budget — so the cap drops to **40 k** to keep the worst-case spike under the Metal cap. `-qwopus` (Qwen3.5-27B 6-bit, ~20 GB resident) has far more headroom, so it runs at **65 k context / 16 k output** (the larger output budget also gives its `<think>` CoT room to finish). The remote `ooz` provider stays at 64 k (it runs on a different machine, not subject to this Mac's Metal cap). If you raise `iogpu.wired_limit_mb` (e.g. `sudo sysctl iogpu.wired_limit_mb=57344`), the default cap can go back up. The 40 k figure is a calculated estimate; the first real full-window turn is the empirical check that it never chokes.
 
 ## Key Details
 
