@@ -112,14 +112,14 @@ ai() {
     model_context_limit=49152
   }
 
-  # Opt-in via -qwopus: "Qwopus" — Qwen3.5-27B distilled on Claude Opus 4.6
+  # Opt-in via -heavy: "Qwopus" — Qwen3.5-27B distilled on Claude Opus 4.6
   # reasoning chains, MLX 6-bit (~20 GB resident). A dense <think> CoT *reasoning*
   # model, NOT the everyday A3B coder — slower per token, thinks before answering;
   # reach for it on hard problems. reasoning_parser=qwen is set for it in
   # ~/.omlx/model_settings.json (same patch script) so oMLX splits the <think>
   # block into reasoning_content instead of leaving raw tags inline in the chat.
-  # opencode-only — see the -cc guard in main logic.
-  _model_qwopus() {
+  # opencode-only (ignored under -ooz, which serves the remote model).
+  _model_heavy() {
     model_id="mlx-community/Qwen3.5-27B-Claude-4.6-Opus-Distilled-MLX-6bit"
     model_label="Qwopus 6-bit (Opus-distilled reasoning)"
     model_context_limit=65536
@@ -143,7 +143,7 @@ ai() {
 
   # Warn if another opencode session is already serving a *different* local model.
   # oMLX is multi-model and lazy-loads whatever model id a request asks for, so a
-  # lingering opencode from a previous `ai`/`ai -qwopus` run keeps requesting its
+  # lingering opencode from a previous `ai`/`ai -heavy` run keeps requesting its
   # model — and oMLX loads it alongside ours. Two ~20-28GB LLMs can't coexist
   # under the memory guard, so it thrashes (evict/reload) and stalls or 507s
   # requests mid-turn (the agent "chokes"). Restarting our server can't stop the
@@ -316,17 +316,16 @@ ai() {
     echo ""
     printf "  ${c_bold}Options:${c_reset}\n"
     printf "    ${c_cyan}-l,     --light${c_reset}       Use the oQ6 +MTP quant ${c_dim}(speculative decode, 49k ctx)${c_reset}\n"
-    printf "    ${c_cyan}-qwopus,--qwopus${c_reset}     Use the Qwopus 6-bit Opus-distilled reasoning model ${c_dim}(opencode only)${c_reset}\n"
-    printf "    ${c_cyan}-hybrid,--hybrid${c_reset}     Enable the cloud-Claude ${c_bold}@advisor${c_reset} subagent ${c_dim}(manual, prompt-only)${c_reset}\n"
+    printf "    ${c_cyan}-heavy, --heavy${c_reset}      Use the Qwopus 6-bit Opus-distilled reasoning model ${c_dim}(opencode only)${c_reset}\n"
+    printf "    ${c_cyan}--no-hybrid${c_reset}          Disable the cloud-Claude ${c_bold}@advisor${c_reset} subagent ${c_dim}(on by default)${c_reset}\n"
     printf "    ${c_cyan}-ooz,   --ooz${c_reset}        Tunnel to the OOZ remote endpoint\n"
-    printf "    ${c_cyan}-cc,    --claude-code${c_reset} Launch Claude Code on local oMLX ${c_dim}(experimental)${c_reset}\n"
     printf "    ${c_cyan}-k,     --kill${c_reset}       Kill the oMLX server and OOZ tunnel\n"
     printf "    ${c_cyan}-h,     --help${c_reset}       Show this help\n"
     echo ""
     printf "  ${c_bold}Model:${c_reset}\n"
     printf "    ${c_dim}Qwen 3.6 35B-A3B 6-bit (local, default)${c_reset}\n"
     printf "    ${c_dim}Qwen 3.6 35B-A3B oQ6 +MTP (local, via -light)${c_reset}\n"
-    printf "    ${c_dim}Qwopus 6-bit Opus-distilled reasoning (local, via -qwopus)${c_reset}\n"
+    printf "    ${c_dim}Qwopus 6-bit Opus-distilled reasoning (local, via -heavy)${c_reset}\n"
     printf "    ${c_dim}remote model via -ooz (auto-detected)${c_reset}\n"
     echo ""
   }
@@ -523,13 +522,7 @@ ai() {
   # ── Dependency checks (mode-aware) ───────────────────────────────────
   _check_deps() {
     local missing=0
-    if [[ "$mode" == "cc" ]]; then
-      if ! command -v claude >/dev/null 2>&1; then
-        _err "Missing dependency: ${c_bold}claude${c_reset} (Claude Code)"
-        _info "Install: ${c_dim}https://claude.com/claude-code${c_reset}"
-        missing=1
-      fi
-    elif ! command -v opencode >/dev/null 2>&1; then
+    if ! command -v opencode >/dev/null 2>&1; then
       _err "Missing dependency: ${c_bold}opencode${c_reset}"
       _info "Install: ${c_dim}go install github.com/opencode-ai/opencode@latest${c_reset}"
       missing=1
@@ -551,9 +544,10 @@ ai() {
 
   # ── Main logic ───────────────────────────────────────────────────────
   local action=""               # "" | "kill" | "help"
-  local mode="local"            # "local" | "ooz" | "cc"
-  local profile="default"       # "default" (35B-A3B 6-bit) | "light" (35B-A3B oQ6 +MTP) | "qwopus" (Qwen3.5-27B Opus-distilled 6-bit)
-  local hybrid=0                # 1 = enable the cloud-Claude @advisor subagent (-hybrid)
+  local mode="local"            # "local" | "ooz"
+  local profile="default"       # "default" (35B-A3B 6-bit) | "light" (35B-A3B oQ6 +MTP) | "heavy" (Qwen3.5-27B Opus-distilled 6-bit)
+  local hybrid=1                # cloud-Claude @advisor subagent ON by default; disable with --no-hybrid (forced off under -ooz)
+  local hybrid_explicit=0      # 1 = user passed -hybrid explicitly (so we warn, not silently drop it, where it can't apply)
   local -a passthrough_args=()
 
   while [[ $# -gt 0 ]]; do
@@ -570,20 +564,21 @@ ai() {
         mode="ooz"
         shift
         ;;
-      -cc|--claude-code)
-        mode="cc"
-        shift
-        ;;
       -l|--light)
         profile="light"
         shift
         ;;
-      -qwopus|--qwopus)
-        profile="qwopus"
+      -heavy|--heavy)
+        profile="heavy"
         shift
         ;;
       -hybrid|--hybrid)
         hybrid=1
+        hybrid_explicit=1
+        shift
+        ;;
+      --no-hybrid|-no-hybrid)
+        hybrid=0
         shift
         ;;
       --)
@@ -602,7 +597,7 @@ ai() {
   # ── Select model profile (local default) ─────────────────────────────
   case "$profile" in
     light)  _model_light ;;
-    qwopus) _model_qwopus ;;
+    heavy)  _model_heavy ;;
     *)      _model_qwen ;;
   esac
   local oc_model="$model_id"
@@ -611,15 +606,6 @@ ai() {
     help) _show_help; return 0 ;;
     kill) _kill_server; _kill_tunnel; return 0 ;;
   esac
-
-  # Qwopus is a reasoning model on the opencode path only — its <think>/
-  # reasoning_content mapping onto Claude Code's Anthropic format is untested, so
-  # refuse the combo rather than silently downgrade to the default model.
-  if [[ "$mode" == "cc" && "$profile" == "qwopus" ]]; then
-    _err "-qwopus is opencode-only and can't be combined with -cc"
-    _info "Run ${c_dim}ai -qwopus${c_reset} (opencode) or ${c_dim}ai -cc${c_reset} (default model) separately"
-    return 1
-  fi
 
   _check_deps || return 1
 
@@ -643,7 +629,7 @@ ai() {
 
     # Pull the selected model eagerly so the server never lazy-fails on a
     # missing download (so a first `ai` fetches the oQ6-mtp default and a first
-    # `ai -qwopus` fetches the Qwopus 6-bit weights).
+    # `ai -heavy` fetches the Qwopus 6-bit weights).
     _ensure_model || return 1
 
     # Enable per-model oMLX settings that aren't server CLI flags: MTP
@@ -759,14 +745,17 @@ ai() {
     _warn "post-edit-check plugin missing — lint/typecheck not enforced"
   fi
 
-  # ── Hybrid cloud advisor (-hybrid) ─────────────────────────────────────
+  # ── Hybrid cloud advisor (on by default; --no-hybrid to disable) ───────────
   # A read-only, prompt-only cloud-Claude subagent the local model never auto-
-  # calls — you summon it by hand with @advisor (see agents/advisor.md). Three
-  # independent privacy controls:
-  #   1. GATING — the agent file is symlinked in ONLY under -hybrid; otherwise it
-  #      is removed, so plain `ai` has no agent referencing the anthropic provider
-  #      and thus no egress path at all. We remove it on every non-hybrid launch so
-  #      a stale symlink can't silently re-open the cloud path.
+  # calls — you summon it by hand with @advisor (see agents/advisor.md). It is
+  # enabled by default on the local opencode path (default/-light/-heavy) and
+  # forced off under -ooz below; --no-hybrid turns it off everywhere.
+  # Three independent privacy controls:
+  #   1. GATING — the agent file is symlinked in ONLY when hybrid is active;
+  #      otherwise it is removed, so a --no-hybrid (or -ooz) launch has no
+  #      agent referencing the anthropic provider and thus no egress path at all.
+  #      We remove it on every non-hybrid launch so a stale symlink can't silently
+  #      re-open the cloud path.
   #   2. MANUAL — opencode.json sets permission.task:"ask", so even if the local
   #      model tries to delegate to the advisor, opencode prompts before anything
   #      leaves the box. The advisor is mode:subagent (never the primary).
@@ -775,16 +764,18 @@ ai() {
   # Every advisor call is recorded by plugins/advisor-egress-log.js to
   # logs/advisor-egress.jsonl (named .jsonl so the logs/*.log prune can't delete
   # the audit trail). The advisor runs on REAL cloud Claude via opencode's built-in
-  # anthropic provider + your `opencode auth login` OAuth — it is NOT the local
-  # oMLX Anthropic endpoint that -cc uses, so -hybrid only applies to the opencode
-  # frontend (it's ignored under -cc, which owns the ANTHROPIC_* env vars).
+  # anthropic provider + your `opencode auth login` OAuth.
   local advisor_src="${ai_dir}/agents/advisor.md"
   local advisor_dst="${HOME}/.config/opencode/agents/advisor.md"
   local egress_src="${ai_dir}/plugins/advisor-egress-log.js"
   local egress_dst="${HOME}/.config/opencode/plugins/advisor-egress-log.js"
   local advisor_egress_log=""
-  if [[ "$hybrid" == "1" && "$mode" == "cc" ]]; then
-    _warn "-hybrid is ignored under -cc (the advisor needs the opencode frontend)"
+  # The advisor is ON by default but only on the local opencode path. It can't
+  # apply under -ooz (the remote path is deliberately kept advisor-free), so force
+  # it off there. Warn only if the user asked for -hybrid explicitly — otherwise
+  # this is just the default not applying and shouldn't be noisy.
+  if [[ "$hybrid" == "1" && "$mode" == "ooz" ]]; then
+    [[ "$hybrid_explicit" == "1" ]] && _warn "-hybrid is ignored under -ooz (the advisor is local-path only)"
     hybrid=0
   fi
   if [[ "$hybrid" == "1" ]]; then
@@ -813,21 +804,6 @@ ai() {
   # ── Launch frontend ──────────────────────────────────────────────────
   echo ""
   cd "$caller_dir" || return 1
-
-  if [[ "$mode" == "cc" ]]; then
-    # Experimental: point Claude Code at the local oMLX Anthropic-compatible
-    # endpoint (/v1/messages). Claude Code believes it's talking to Anthropic;
-    # oMLX serves Qwen. ANTHROPIC_MODEL overrides the requested model id so the
-    # request resolves to a model oMLX actually serves.
-    _info "Launching ${c_bold}Claude Code${c_reset} → ${c_bold}local oMLX${c_reset} ${c_dim}(experimental)${c_reset}"
-    echo ""
-    ANTHROPIC_BASE_URL="http://127.0.0.1:${server_port}" \
-    ANTHROPIC_API_KEY="omlx" \
-    ANTHROPIC_MODEL="$model_id" \
-    ANTHROPIC_SMALL_FAST_MODEL="$model_id" \
-    claude "${passthrough_args[@]}"
-    return $?
-  fi
 
   _info "Launching ${c_bold}opencode${c_reset} with ${c_bold}${oc_provider}/${oc_model}${c_reset}"
   echo ""

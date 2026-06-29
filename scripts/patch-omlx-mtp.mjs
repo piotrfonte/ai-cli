@@ -34,7 +34,7 @@ import { homedir } from "os";
 const SETTINGS_VERSION = 1;
 
 // Model → the exact settings keys ai.sh must enforce. Keep these ids in sync with
-// the model ids in ai.sh (_model_light / _model_qwopus) and opencode.json.
+// the model ids in ai.sh (_model_light / _model_heavy) and opencode.json.
 const DESIRED = {
   "Jundot/Qwen3.6-35B-A3B-oQ6-mtp": { mtp_enabled: true },
   "mlx-community/Qwen3.5-27B-Claude-4.6-Opus-Distilled-MLX-6bit": {
