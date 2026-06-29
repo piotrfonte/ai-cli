@@ -15,11 +15,19 @@
         "chunkTimeout": 600000
       },
       "models": {
+        "mlx-community/Qwen3.6-35B-A3B-6bit": {
+          "name": "Qwen 3.6 35B-A3B 6-bit",
+          "temperature": false,
+          "limit": {
+            "context": 65536,
+            "output": 8192
+          }
+        },
         "Jundot/Qwen3.6-35B-A3B-oQ6-mtp": {
           "name": "Qwen 3.6 35B-A3B oQ6 +MTP",
           "temperature": false,
           "limit": {
-            "context": 40960,
+            "context": 49152,
             "output": 8192
           }
         },
@@ -55,7 +63,7 @@
       }
     }
   },
-  "model": "mlx/Jundot/Qwen3.6-35B-A3B-oQ6-mtp",
+  "model": "mlx/mlx-community/Qwen3.6-35B-A3B-6bit",
   "default_agent": "build",
   "watcher": {
     "ignore": ["node_modules/**", "dist/**", "build/**", ".next/**", "*.log"]

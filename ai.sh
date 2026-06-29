@@ -88,17 +88,28 @@ ai() {
 
   # ── Model profile ────────────────────────────────────────────────────
   # model_id must match a model oMLX serves from --model-dir (the two-level
-  # mlx-community/<name> form is accepted) AND the id keyed in opencode.json.
-  # Default: Qwen 3.6 35B-A3B in oMLX's native oQ6 quant (data-driven mixed
-  # precision) with MTP heads preserved (-mtp). MTP (multi-token prediction /
-  # speculative decode) is OFF by default in oMLX and is enabled per-model via
-  # ~/.omlx/model_settings.json — ai.sh writes that key on launch (see
-  # scripts/patch-omlx-mtp.mjs). ~30 GB resident, so the worst-case KV stays
-  # under the Metal working-set cap only at ~40 k context (see opencode.json).
+  # <namespace>/<name> form is accepted) AND the id keyed in opencode.json.
+  # Default: Qwen 3.6 35B-A3B in a flat MLX 6-bit quant (~27.5 GB resident).
+  # The everyday coder — broad context (65 k) and no per-model oMLX settings to
+  # enable; just works on a fresh box.
   _model_qwen() {
+    model_id="mlx-community/Qwen3.6-35B-A3B-6bit"
+    model_label="Qwen 3.6 35B-A3B 6-bit"
+    model_context_limit=65536
+  }
+
+  # Opt-in via -light/-l: the same A3B model in oMLX's native oQ6 quant
+  # (data-driven mixed precision) with MTP heads preserved (-mtp). MTP
+  # (multi-token prediction / speculative decode) is OFF by default in oMLX and
+  # is enabled per-model via ~/.omlx/model_settings.json — ai.sh writes that key
+  # on launch (see scripts/patch-omlx-mtp.mjs). ~30 GB resident; KV is cheap
+  # (2 KV heads → ~80 KB/token), so the binding limit is the prefill transient
+  # against the Metal working-set cap — 49 k is the empirically safe ceiling
+  # (see opencode.json). Faster decode than the flat 6-bit when MTP engages.
+  _model_light() {
     model_id="Jundot/Qwen3.6-35B-A3B-oQ6-mtp"
-    model_label="Qwen 3.6 35B-A3B oQ6 +MTP"
-    model_context_limit=40960
+    model_label="Qwen 3.6 35B-A3B oQ6 +MTP (light)"
+    model_context_limit=49152
   }
 
   # Opt-in via -qwopus: "Qwopus" — Qwen3.5-27B distilled on Claude Opus 4.6
@@ -304,6 +315,7 @@ ai() {
     printf "  ${c_bold}Usage:${c_reset}  ai.sh [OPTIONS] [-- frontend-args...]\n"
     echo ""
     printf "  ${c_bold}Options:${c_reset}\n"
+    printf "    ${c_cyan}-l,     --light${c_reset}       Use the oQ6 +MTP quant ${c_dim}(speculative decode, 49k ctx)${c_reset}\n"
     printf "    ${c_cyan}-qwopus,--qwopus${c_reset}     Use the Qwopus 6-bit Opus-distilled reasoning model ${c_dim}(opencode only)${c_reset}\n"
     printf "    ${c_cyan}-hybrid,--hybrid${c_reset}     Enable the cloud-Claude ${c_bold}@advisor${c_reset} subagent ${c_dim}(manual, prompt-only)${c_reset}\n"
     printf "    ${c_cyan}-ooz,   --ooz${c_reset}        Tunnel to the OOZ remote endpoint\n"
@@ -312,7 +324,8 @@ ai() {
     printf "    ${c_cyan}-h,     --help${c_reset}       Show this help\n"
     echo ""
     printf "  ${c_bold}Model:${c_reset}\n"
-    printf "    ${c_dim}Qwen 3.6 35B-A3B oQ6 +MTP (local, default)${c_reset}\n"
+    printf "    ${c_dim}Qwen 3.6 35B-A3B 6-bit (local, default)${c_reset}\n"
+    printf "    ${c_dim}Qwen 3.6 35B-A3B oQ6 +MTP (local, via -light)${c_reset}\n"
     printf "    ${c_dim}Qwopus 6-bit Opus-distilled reasoning (local, via -qwopus)${c_reset}\n"
     printf "    ${c_dim}remote model via -ooz (auto-detected)${c_reset}\n"
     echo ""
@@ -539,7 +552,7 @@ ai() {
   # ── Main logic ───────────────────────────────────────────────────────
   local action=""               # "" | "kill" | "help"
   local mode="local"            # "local" | "ooz" | "cc"
-  local profile="default"       # "default" (35B-A3B oQ6 +MTP) | "qwopus" (Qwen3.5-27B Opus-distilled 6-bit)
+  local profile="default"       # "default" (35B-A3B 6-bit) | "light" (35B-A3B oQ6 +MTP) | "qwopus" (Qwen3.5-27B Opus-distilled 6-bit)
   local hybrid=0                # 1 = enable the cloud-Claude @advisor subagent (-hybrid)
   local -a passthrough_args=()
 
@@ -559,6 +572,10 @@ ai() {
         ;;
       -cc|--claude-code)
         mode="cc"
+        shift
+        ;;
+      -l|--light)
+        profile="light"
         shift
         ;;
       -qwopus|--qwopus)
@@ -584,6 +601,7 @@ ai() {
 
   # ── Select model profile (local default) ─────────────────────────────
   case "$profile" in
+    light)  _model_light ;;
     qwopus) _model_qwopus ;;
     *)      _model_qwen ;;
   esac
