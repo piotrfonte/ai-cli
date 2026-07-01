@@ -78,14 +78,6 @@ ai() {
   local omlx_memory_guard_gb="${OMLX_MEMORY_GUARD_GB:-48}"  # ceiling on 64 GB box
   local omlx_max_concurrent="${OMLX_MAX_CONCURRENT:-2}"     # continuous batching: 1 coding turn + 1 opencode-mem summarizer
 
-  # ── OOZ remote endpoint config (used by -ooz; set in ai.env) ─────────
-  local ooz_ssh_host="${OOZ_SSH_HOST:-}"
-  local ooz_ssh_user="${OOZ_SSH_USER:-}"
-  local ooz_ssh_port="${OOZ_SSH_PORT:-22}"
-  local ooz_local_port="${OOZ_LOCAL_PORT:-8089}"
-  local ooz_remote="${OOZ_REMOTE:-127.0.0.1:8080}"
-  local ooz_model="${OOZ_MODEL:-}"   # pin model id; empty → auto-detect
-
   # ── Model profile ────────────────────────────────────────────────────
   # model_id must match a model oMLX serves from --model-dir (the two-level
   # <namespace>/<name> form is accepted) AND the id keyed in opencode.json.
@@ -98,7 +90,7 @@ ai() {
     model_context_limit=65536
   }
 
-  # Opt-in via -light/-l: the same A3B model in oMLX's native oQ6 quant
+  # Opt-in via -l/--lite: the same A3B model in oMLX's native oQ6 quant
   # (data-driven mixed precision) with MTP heads preserved (-mtp). MTP
   # (multi-token prediction / speculative decode) is OFF by default in oMLX and
   # is enabled per-model via ~/.omlx/model_settings.json — ai.sh writes that key
@@ -106,23 +98,10 @@ ai() {
   # (2 KV heads → ~80 KB/token), so the binding limit is the prefill transient
   # against the Metal working-set cap — 49 k is the empirically safe ceiling
   # (see opencode.json). Faster decode than the flat 6-bit when MTP engages.
-  _model_light() {
+  _model_lite() {
     model_id="Jundot/Qwen3.6-35B-A3B-oQ6-mtp"
-    model_label="Qwen 3.6 35B-A3B oQ6 +MTP (light)"
+    model_label="Qwen 3.6 35B-A3B oQ6 +MTP (lite)"
     model_context_limit=49152
-  }
-
-  # Opt-in via -heavy: "Qwopus" — Qwen3.5-27B distilled on Claude Opus 4.6
-  # reasoning chains, MLX 6-bit (~20 GB resident). A dense <think> CoT *reasoning*
-  # model, NOT the everyday A3B coder — slower per token, thinks before answering;
-  # reach for it on hard problems. reasoning_parser=qwen is set for it in
-  # ~/.omlx/model_settings.json (same patch script) so oMLX splits the <think>
-  # block into reasoning_content instead of leaving raw tags inline in the chat.
-  # opencode-only (ignored under -ooz, which serves the remote model).
-  _model_heavy() {
-    model_id="mlx-community/Qwen3.5-27B-Claude-4.6-Opus-Distilled-MLX-6bit"
-    model_label="Qwopus 6-bit (Opus-distilled reasoning)"
-    model_context_limit=65536
   }
 
   local oc_provider="mlx"
@@ -143,7 +122,7 @@ ai() {
 
   # Warn if another opencode session is already serving a *different* local model.
   # oMLX is multi-model and lazy-loads whatever model id a request asks for, so a
-  # lingering opencode from a previous `ai`/`ai -heavy` run keeps requesting its
+  # lingering opencode from a previous `ai`/`ai -l` run keeps requesting its
   # model — and oMLX loads it alongside ours. Two ~20-28GB LLMs can't coexist
   # under the memory guard, so it thrashes (evict/reload) and stalls or 507s
   # requests mid-turn (the agent "chokes"). Restarting our server can't stop the
@@ -226,85 +205,6 @@ ai() {
     fi
   }
 
-  # ── OOZ SSH tunnel lifecycle ─────────────────────────────────────────
-  _tunnel_healthy() {
-    curl -sf --max-time 2 "http://127.0.0.1:${ooz_local_port}/v1/models" >/dev/null 2>&1
-  }
-
-  _kill_tunnel() {
-    local port_pids
-    port_pids=$(lsof -ti "tcp:${ooz_local_port}" -sTCP:LISTEN 2>/dev/null)
-    local killed=""
-    for pid in $port_pids; do
-      local cmd_name
-      cmd_name=$(ps -o comm= -p "$pid" 2>/dev/null | tr '[:upper:]' '[:lower:]')
-      if [[ "$cmd_name" == *ssh* ]]; then
-        kill "$pid" 2>/dev/null && killed="$killed $pid"
-      fi
-    done
-    [[ -n "$killed" ]] && _ok "Tunnel closed${c_dim} (PID${killed})${c_reset}"
-  }
-
-  _start_tunnel() {
-    if [[ -z "$ooz_ssh_host" || -z "$ooz_ssh_user" ]]; then
-      _err "OOZ endpoint not configured"
-      _info "Set ${c_bold}OOZ_SSH_HOST${c_reset} and ${c_bold}OOZ_SSH_USER${c_reset} in ${c_dim}${ai_dir}/ai.env${c_reset}"
-      return 1
-    fi
-
-    if _tunnel_healthy; then
-      _ok "Tunnel already up${c_dim} (127.0.0.1:${ooz_local_port})${c_reset}"
-      return 0
-    fi
-
-    echo ""
-    _box_top
-    _box_line " ${c_bold}Opening SSH Tunnel${c_reset}"
-    _box_mid
-    _box_line " ${c_bold}Remote:${c_reset} ${ooz_ssh_user}@${ooz_ssh_host}:${ooz_ssh_port}"
-    _box_line " ${c_bold}Forward:${c_reset} 127.0.0.1:${ooz_local_port} → ${ooz_remote}"
-    _box_bottom
-    echo ""
-
-    # -f backgrounds after auth + forward setup (so a passphrase prompt
-    # still works); ExitOnForwardFailure makes a bind failure fatal.
-    ssh -f -N -C \
-      -o ExitOnForwardFailure=yes \
-      -L "${ooz_local_port}:${ooz_remote}" \
-      -p "${ooz_ssh_port}" \
-      "${ooz_ssh_user}@${ooz_ssh_host}" || {
-      _err "SSH tunnel failed to establish"
-      return 1
-    }
-
-    local elapsed=0
-    local frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
-    local fi=0
-    while (( elapsed < 30 )); do
-      if _tunnel_healthy; then
-        printf "\r                                                    \r"
-        _ok "Tunnel ready${c_dim} (127.0.0.1:${ooz_local_port}, took ${elapsed}s)${c_reset}"
-        return 0
-      fi
-      printf "\r  ${c_cyan}${frames[$fi]}${c_reset} Waiting for endpoint... ${c_dim}(${elapsed}s)${c_reset}"
-      fi=$(( (fi + 1) % ${#frames[@]} ))
-      sleep 1
-      (( elapsed++ ))
-    done
-
-    printf "\r                                                    \r"
-    _err "Endpoint at 127.0.0.1:${ooz_local_port} did not respond within 30s"
-    _kill_tunnel
-    return 1
-  }
-
-  _discover_ooz_model() {
-    curl -sf --max-time 5 "http://127.0.0.1:${ooz_local_port}/v1/models" 2>/dev/null \
-      | tr ',{}' '\n\n\n' \
-      | grep -m1 '"id"' \
-      | sed -E 's/.*"id"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/'
-  }
-
   # ── Show help ────────────────────────────────────────────────────────
   _show_help() {
     echo ""
@@ -315,18 +215,14 @@ ai() {
     printf "  ${c_bold}Usage:${c_reset}  ai.sh [OPTIONS] [-- frontend-args...]\n"
     echo ""
     printf "  ${c_bold}Options:${c_reset}\n"
-    printf "    ${c_cyan}-l,     --light${c_reset}       Use the oQ6 +MTP quant ${c_dim}(speculative decode, 49k ctx)${c_reset}\n"
-    printf "    ${c_cyan}-heavy, --heavy${c_reset}      Use the Qwopus 6-bit Opus-distilled reasoning model ${c_dim}(opencode only)${c_reset}\n"
+    printf "    ${c_cyan}-l,     --lite${c_reset}        Use the oQ6 +MTP quant ${c_dim}(speculative decode, 49k ctx)${c_reset}\n"
     printf "    ${c_cyan}--no-hybrid${c_reset}          Disable the cloud-Claude ${c_bold}@advisor${c_reset} subagent ${c_dim}(on by default)${c_reset}\n"
-    printf "    ${c_cyan}-ooz,   --ooz${c_reset}        Tunnel to the OOZ remote endpoint\n"
-    printf "    ${c_cyan}-k,     --kill${c_reset}       Kill the oMLX server and OOZ tunnel\n"
+    printf "    ${c_cyan}-k,     --kill${c_reset}       Kill the oMLX server\n"
     printf "    ${c_cyan}-h,     --help${c_reset}       Show this help\n"
     echo ""
     printf "  ${c_bold}Model:${c_reset}\n"
     printf "    ${c_dim}Qwen 3.6 35B-A3B 6-bit (local, default)${c_reset}\n"
-    printf "    ${c_dim}Qwen 3.6 35B-A3B oQ6 +MTP (local, via -light)${c_reset}\n"
-    printf "    ${c_dim}Qwopus 6-bit Opus-distilled reasoning (local, via -heavy)${c_reset}\n"
-    printf "    ${c_dim}remote model via -ooz (auto-detected)${c_reset}\n"
+    printf "    ${c_dim}Qwen 3.6 35B-A3B oQ6 +MTP (local, via -l)${c_reset}\n"
     echo ""
   }
 
@@ -527,12 +423,7 @@ ai() {
       _info "Install: ${c_dim}go install github.com/opencode-ai/opencode@latest${c_reset}"
       missing=1
     fi
-    if [[ "$mode" == "ooz" ]]; then
-      if ! command -v ssh >/dev/null 2>&1; then
-        _err "Missing dependency: ${c_bold}ssh${c_reset}"
-        missing=1
-      fi
-    elif [[ ! -x "$omlx_bin" ]] && ! command -v omlx >/dev/null 2>&1; then
+    if [[ ! -x "$omlx_bin" ]] && ! command -v omlx >/dev/null 2>&1; then
       _err "Missing dependency: ${c_bold}omlx${c_reset} (expected at ${c_dim}${omlx_bin}${c_reset})"
       _info "Build: ${c_dim}git clone https://github.com/jundot/omlx ~/.omlx/src \\"
       _info "  && uv venv ~/.omlx/venv --python 3.12 \\"
@@ -544,10 +435,8 @@ ai() {
 
   # ── Main logic ───────────────────────────────────────────────────────
   local action=""               # "" | "kill" | "help"
-  local mode="local"            # "local" | "ooz"
-  local profile="default"       # "default" (35B-A3B 6-bit) | "light" (35B-A3B oQ6 +MTP) | "heavy" (Qwen3.5-27B Opus-distilled 6-bit)
-  local hybrid=1                # cloud-Claude @advisor subagent ON by default; disable with --no-hybrid (forced off under -ooz)
-  local hybrid_explicit=0      # 1 = user passed -hybrid explicitly (so we warn, not silently drop it, where it can't apply)
+  local profile="default"       # "default" (35B-A3B 6-bit) | "lite" (35B-A3B oQ6 +MTP)
+  local hybrid=1                # cloud-Claude @advisor subagent ON by default; disable with --no-hybrid
   local -a passthrough_args=()
 
   while [[ $# -gt 0 ]]; do
@@ -560,21 +449,12 @@ ai() {
         action="help"
         shift
         ;;
-      -ooz|--ooz)
-        mode="ooz"
-        shift
-        ;;
-      -l|--light)
-        profile="light"
-        shift
-        ;;
-      -heavy|--heavy)
-        profile="heavy"
+      -l|--lite)
+        profile="lite"
         shift
         ;;
       -hybrid|--hybrid)
         hybrid=1
-        hybrid_explicit=1
         shift
         ;;
       --no-hybrid|-no-hybrid)
@@ -596,85 +476,67 @@ ai() {
 
   # ── Select model profile (local default) ─────────────────────────────
   case "$profile" in
-    light)  _model_light ;;
-    heavy)  _model_heavy ;;
-    *)      _model_qwen ;;
+    lite)  _model_lite ;;
+    *)     _model_qwen ;;
   esac
   local oc_model="$model_id"
 
   case "$action" in
     help) _show_help; return 0 ;;
-    kill) _kill_server; _kill_tunnel; return 0 ;;
+    kill) _kill_server; return 0 ;;
   esac
 
   _check_deps || return 1
 
-  if [[ "$mode" == "ooz" ]]; then
-    # ── OOZ remote endpoint via SSH tunnel ─────────────────────────────
-    _start_tunnel || return 1
-    # Prefer the pinned OOZ_MODEL (matches opencode.json); else auto-detect.
-    oc_model="$ooz_model"
-    if [[ -z "$oc_model" ]]; then
-      oc_model=$(_discover_ooz_model)
-    fi
-    if [[ -z "$oc_model" ]]; then
-      _err "Could not detect a model from the OOZ endpoint"
-      _info "Set ${c_bold}OOZ_MODEL${c_reset} in ai.env, or check ${c_dim}http://127.0.0.1:${ooz_local_port}/v1/models${c_reset}"
-      return 1
-    fi
-    oc_provider="ooz"
-    _ok "Remote model: ${c_bold}${oc_model}${c_reset}"
-  else
-    _reap_orphan_mcps
+  _reap_orphan_mcps
 
-    # Pull the selected model eagerly so the server never lazy-fails on a
-    # missing download (so a first `ai` fetches the oQ6-mtp default and a first
-    # `ai -heavy` fetches the Qwopus 6-bit weights).
-    _ensure_model || return 1
+  # Pull the selected model eagerly so the server never lazy-fails on a
+  # missing download (a first `ai` fetches the 6-bit default; a first `ai -l`
+  # fetches the oQ6-mtp weights).
+  _ensure_model || return 1
 
-    # Enable per-model oMLX settings that aren't server CLI flags: MTP
-    # (multi-token prediction) for the oQ6-mtp default and reasoning_parser for
-    # Qwopus. These live in ~/.omlx/model_settings.json, which oMLX reads at model
-    # load — so a running server must be restarted to pick up a change (the
-    # model-switch restart below handles the common case). Idempotent merge: it
-    # only writes when a value differs, and never clobbers other models/keys.
-    local omlx_base_dir="${OMLX_BASE_DIR:-${HOME}/.omlx}"
-    if command -v node >/dev/null 2>&1 && [[ -f "${ai_dir}/scripts/patch-omlx-mtp.mjs" ]]; then
-      node "${ai_dir}/scripts/patch-omlx-mtp.mjs" "${omlx_base_dir}/model_settings.json" >/dev/null 2>&1
-    fi
+  # Enable per-model oMLX settings that aren't server CLI flags: MTP
+  # (multi-token prediction) for the oQ6-mtp (`-l`) build. These live in
+  # ~/.omlx/model_settings.json, which oMLX reads at model
+  # load — so a running server must be restarted to pick up a change (the
+  # model-switch restart below handles the common case). Idempotent merge: it
+  # only writes when a value differs, and never clobbers other models/keys.
+  local omlx_base_dir="${OMLX_BASE_DIR:-${HOME}/.omlx}"
+  if command -v node >/dev/null 2>&1 && [[ -f "${ai_dir}/scripts/patch-omlx-mtp.mjs" ]]; then
+    node "${ai_dir}/scripts/patch-omlx-mtp.mjs" "${omlx_base_dir}/model_settings.json" >/dev/null 2>&1
+  fi
 
-    # ── Server management ──────────────────────────────────────────────
-    local running_pid
-    running_pid=$(_server_pid)
+  # ── Server management ──────────────────────────────────────────────
+  local running_pid
+  running_pid=$(_server_pid)
 
-    if [[ -n "$running_pid" ]]; then
-      if _server_healthy; then
-        local running_model=""
-        if [[ -f "$state_file" ]]; then
-          IFS= read -r running_model < "$state_file"
-        fi
-        if [[ "$running_model" != "$model_id" ]]; then
-          _warn "Server running with different model (${running_model:-unknown})"
-          _info "Switching to ${c_bold}${model_label}${c_reset}"
-          _kill_server
-          _start_server || return 1
-        else
-          _ok "Server already running: ${c_bold}${model_label}${c_reset} ${c_dim}(PID ${running_pid})${c_reset}"
-        fi
-      else
-        _warn "Port ${server_port} occupied but server is not healthy"
-        _info "Killing stale process ${c_dim}(PID ${running_pid})${c_reset}"
+  if [[ -n "$running_pid" ]]; then
+    if _server_healthy; then
+      local running_model=""
+      if [[ -f "$state_file" ]]; then
+        IFS= read -r running_model < "$state_file"
+      fi
+      if [[ "$running_model" != "$model_id" ]]; then
+        _warn "Server running with different model (${running_model:-unknown})"
+        _info "Switching to ${c_bold}${model_label}${c_reset}"
         _kill_server
         _start_server || return 1
+      else
+        _ok "Server already running: ${c_bold}${model_label}${c_reset} ${c_dim}(PID ${running_pid})${c_reset}"
       fi
     else
+      _warn "Port ${server_port} occupied but server is not healthy"
+      _info "Killing stale process ${c_dim}(PID ${running_pid})${c_reset}"
+      _kill_server
       _start_server || return 1
     fi
-
-    # Detect a lingering opencode on a different model that would force oMLX to
-    # hold two big LLMs at once (the server restart above can't stop that client).
-    _warn_model_conflict
+  else
+    _start_server || return 1
   fi
+
+  # Detect a lingering opencode on a different model that would force oMLX to
+  # hold two big LLMs at once (the server restart above can't stop that client).
+  _warn_model_conflict
 
   # ── RAG check ──────────────────────────────────────────────────────
   # opencode.json points smart-coding at a private, repo-owned copy of
@@ -711,6 +573,16 @@ ai() {
       "${HOME}"/.cache/opencode/packages/opencode-mem@*/node_modules/opencode-mem; do
       [[ -d "$mem_pkg" ]] || continue
       node "${ai_dir}/scripts/patch-opencode-mem-cap.mjs" "$mem_pkg" >/dev/null 2>&1
+      # Directory-exclude: skip capture/recall in OPENCODE_MEM_EXCLUDE_DIRS trees
+      # (any sensitive client repos). See the patch script — opencode-mem has no
+      # native directory-scoped opt-out, so we patch one in.
+      [[ -f "${ai_dir}/scripts/patch-opencode-mem-exclude.mjs" ]] && \
+        node "${ai_dir}/scripts/patch-opencode-mem-exclude.mjs" "$mem_pkg" >/dev/null 2>&1
+      # Model override: let OPENCODE_MEM_MODEL (set at launch to the session model)
+      # steer the summarizer, so it reuses the already-loaded model instead of pulling
+      # in the default 35B alongside a -m/-l session and thrashing the memory guard.
+      [[ -f "${ai_dir}/scripts/patch-opencode-mem-model.mjs" ]] && \
+        node "${ai_dir}/scripts/patch-opencode-mem-model.mjs" "$mem_pkg" >/dev/null 2>&1
     done
   fi
   if command -v node >/dev/null 2>&1 && [[ -e "${HOME}/.config/opencode/opencode-mem.jsonc" ]]; then
@@ -748,11 +620,10 @@ ai() {
   # ── Hybrid cloud advisor (on by default; --no-hybrid to disable) ───────────
   # A read-only, prompt-only cloud-Claude subagent the local model never auto-
   # calls — you summon it by hand with @advisor (see agents/advisor.md). It is
-  # enabled by default on the local opencode path (default/-light/-heavy) and
-  # forced off under -ooz below; --no-hybrid turns it off everywhere.
+  # enabled by default (default/-l/-m); --no-hybrid turns it off.
   # Three independent privacy controls:
   #   1. GATING — the agent file is symlinked in ONLY when hybrid is active;
-  #      otherwise it is removed, so a --no-hybrid (or -ooz) launch has no
+  #      otherwise it is removed, so a --no-hybrid launch has no
   #      agent referencing the anthropic provider and thus no egress path at all.
   #      We remove it on every non-hybrid launch so a stale symlink can't silently
   #      re-open the cloud path.
@@ -770,14 +641,6 @@ ai() {
   local egress_src="${ai_dir}/plugins/advisor-egress-log.js"
   local egress_dst="${HOME}/.config/opencode/plugins/advisor-egress-log.js"
   local advisor_egress_log=""
-  # The advisor is ON by default but only on the local opencode path. It can't
-  # apply under -ooz (the remote path is deliberately kept advisor-free), so force
-  # it off there. Warn only if the user asked for -hybrid explicitly — otherwise
-  # this is just the default not applying and shouldn't be noisy.
-  if [[ "$hybrid" == "1" && "$mode" == "ooz" ]]; then
-    [[ "$hybrid_explicit" == "1" ]] && _warn "-hybrid is ignored under -ooz (the advisor is local-path only)"
-    hybrid=0
-  fi
   if [[ "$hybrid" == "1" ]]; then
     if [[ -f "$advisor_src" && -f "$egress_src" ]]; then
       mkdir -p "${HOME}/.config/opencode/agents" "${HOME}/.config/opencode/plugins" "$ai_log_dir"
@@ -809,7 +672,15 @@ ai() {
   echo ""
   # ADVISOR_EGRESS_LOG is empty unless -hybrid enabled the advisor; the egress-log
   # plugin (only symlinked under -hybrid) reads it to record what's sent to @advisor.
+  # OPENCODE_MEM_EXCLUDE_DIRS: never capture/recall memory from these trees. Prepend
+  # sensitive client-repo roots via ai.env; read by the patched opencode-mem
+  # (patch-opencode-mem-exclude.mjs).
+  # OPENCODE_MEM_MODEL points the opencode-mem summarizer at the SAME model this
+  # session runs (read by the patched config.js), so auto-capture never loads a second
+  # ~20-28GB model alongside -l and thrashes the memory guard into a 507 loop.
   ADVISOR_EGRESS_LOG="$advisor_egress_log" \
+  OPENCODE_MEM_EXCLUDE_DIRS="${OPENCODE_MEM_EXCLUDE_DIRS:-}" \
+  OPENCODE_MEM_MODEL="$model_id" \
   opencode -m "${oc_provider}/${oc_model}" "${passthrough_args[@]}"
   return $?
 }

@@ -3,16 +3,13 @@
 //
 // oMLX exposes some model behaviour only through per-model settings persisted in
 // ~/.omlx/model_settings.json (read by the server at model load), NOT through
-// `omlx serve` CLI flags. ai.sh needs two such settings on every launch:
+// `omlx serve` CLI flags. ai.sh needs one such setting on every launch:
 //
-//   • mtp_enabled=true for the oQ6-mtp build (ai -light) — multi-token prediction /
+//   • mtp_enabled=true for the oQ6-mtp build (ai -l) — multi-token prediction /
 //     speculative decode. It's OFF by default in oMLX even when the weights carry
 //     MTP heads (the `-mtp` build), so without this the build's MTP tensors are
 //     dead weight. (mtp_enabled is mutually exclusive with turboquant_kv / dflash,
 //     neither of which ai.sh enables, so there's no conflict.)
-//   • reasoning_parser="qwen" for Qwopus — splits its <think>…</think> block into
-//     a separate reasoning_content field instead of leaving raw tags inline in the
-//     opencode chat.
 //
 // File schema (see omlx/model_settings.py): {"version":1,"models":{<id>:{…}}}.
 // ModelSettings.from_dict() filters to known fields and defaults the rest, so a
@@ -34,12 +31,9 @@ import { homedir } from "os";
 const SETTINGS_VERSION = 1;
 
 // Model → the exact settings keys ai.sh must enforce. Keep these ids in sync with
-// the model ids in ai.sh (_model_light / _model_heavy) and opencode.json.
+// the model ids in ai.sh (_model_lite) and opencode.json.
 const DESIRED = {
   "Jundot/Qwen3.6-35B-A3B-oQ6-mtp": { mtp_enabled: true },
-  "mlx-community/Qwen3.5-27B-Claude-4.6-Opus-Distilled-MLX-6bit": {
-    reasoning_parser: "qwen",
-  },
 };
 
 const file = process.argv[2] || `${homedir()}/.omlx/model_settings.json`;

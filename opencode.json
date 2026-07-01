@@ -30,35 +30,6 @@
             "context": 49152,
             "output": 8192
           }
-        },
-        "mlx-community/Qwen3.5-27B-Claude-4.6-Opus-Distilled-MLX-6bit": {
-          "name": "Qwopus 6-bit (Opus-distilled reasoning)",
-          "temperature": false,
-          "limit": {
-            "context": 65536,
-            "output": 16384
-          }
-        }
-      }
-    },
-    "ooz": {
-      "npm": "@ai-sdk/openai-compatible",
-      "name": "OOZ Remote",
-      "options": {
-        "baseURL": "http://127.0.0.1:8089/v1",
-        "apiKey": "ooz",
-        "logLevel": "ERROR",
-        "timeout": 600000,
-        "chunkTimeout": 600000
-      },
-      "models": {
-        "Qwen3.6-35B-A3B-GGUF:Q8_0": {
-          "name": "Qwen 3.6 35B-A3B (Q8_0, remote)",
-          "temperature": false,
-          "limit": {
-            "context": 65536,
-            "output": 8192
-          }
         }
       }
     }
