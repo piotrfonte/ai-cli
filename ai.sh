@@ -215,7 +215,7 @@ ai() {
     printf "  ${c_bold}Usage:${c_reset}  ai.sh [OPTIONS] [-- frontend-args...]\n"
     echo ""
     printf "  ${c_bold}Options:${c_reset}\n"
-    printf "    ${c_cyan}-l,     --lite${c_reset}        Use the oQ6 +MTP quant ${c_dim}(speculative decode, 49k ctx)${c_reset}\n"
+    printf "    ${c_cyan}-l,     --lite${c_reset}        Use the oQ6 +MTP quant ${c_dim}(speculative decode, 49k ctx, no MCPs)${c_reset}\n"
     printf "    ${c_cyan}--no-hybrid${c_reset}          Disable the cloud-Claude ${c_bold}@advisor${c_reset} subagent ${c_dim}(on by default)${c_reset}\n"
     printf "    ${c_cyan}-k,     --kill${c_reset}       Kill the oMLX server\n"
     printf "    ${c_cyan}-h,     --help${c_reset}       Show this help\n"
@@ -538,22 +538,35 @@ ai() {
   # hold two big LLMs at once (the server restart above can't stop that client).
   _warn_model_conflict
 
-  # ── RAG check ──────────────────────────────────────────────────────
-  # opencode.json points smart-coding at a private, repo-owned copy of
-  # smart-coding-mcp (so we never mutate a shared global package). Its embedder
-  # is patched to run on oMLX (bge-m3, Metal) instead of in-process Xenova —
-  # re-applied idempotently here so a `npm update` of the copy can't silently
-  # revert it. The patch falls back to Xenova if the oMLX env isn't set.
-  local sc_omlx_dir="${SMART_CODING_OMLX_DIR:-${HOME}/.smart-coding-omlx}"
-  local sc_pkg="${sc_omlx_dir}/node_modules/smart-coding-mcp"
-  if [[ -d "$sc_pkg" ]]; then
-    if command -v node >/dev/null 2>&1 && [[ -f "${ai_dir}/scripts/patch-smart-coding-omlx.mjs" ]]; then
-      node "${ai_dir}/scripts/patch-smart-coding-omlx.mjs" "$sc_pkg" >/dev/null 2>&1
+  # ── MCP / RAG ──────────────────────────────────────────────────────
+  # Lite runs MCP-free. opencode deep-merges OPENCODE_CONFIG_CONTENT over the
+  # global opencode.json (later wins), so emitting {enabled:false} for every MCP
+  # server declared there disables them all for this session only — no edit to
+  # opencode.json, and new servers added later are covered automatically. Passed
+  # to the opencode launch below; an empty value is ignored by opencode.
+  local oc_config_content=""
+  if [[ "$profile" == "lite" ]]; then
+    if command -v node >/dev/null 2>&1 && [[ -f "${ai_dir}/opencode.json" ]]; then
+      oc_config_content=$(node -e 'const fs=require("fs");const c=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));const m={};for(const k of Object.keys(c.mcp||{}))m[k]={enabled:false};process.stdout.write(JSON.stringify({$schema:"https://opencode.ai/config.json",mcp:m}));' "${ai_dir}/opencode.json" 2>/dev/null)
     fi
-    _ok "smart-coding-mcp available ${c_dim}(private; embeddings on oMLX bge-m3)${c_reset}"
+    _info "MCPs disabled ${c_dim}(lite — no smart-coding RAG / chrome-devtools)${c_reset}"
   else
-    _warn "smart-coding-mcp (oMLX) not installed — RAG disabled"
-    _info "Install: ${c_dim}npm install --prefix ${sc_omlx_dir} smart-coding-mcp${c_reset}"
+    # opencode.json points smart-coding at a private, repo-owned copy of
+    # smart-coding-mcp (so we never mutate a shared global package). Its embedder
+    # is patched to run on oMLX (bge-m3, Metal) instead of in-process Xenova —
+    # re-applied idempotently here so a `npm update` of the copy can't silently
+    # revert it. The patch falls back to Xenova if the oMLX env isn't set.
+    local sc_omlx_dir="${SMART_CODING_OMLX_DIR:-${HOME}/.smart-coding-omlx}"
+    local sc_pkg="${sc_omlx_dir}/node_modules/smart-coding-mcp"
+    if [[ -d "$sc_pkg" ]]; then
+      if command -v node >/dev/null 2>&1 && [[ -f "${ai_dir}/scripts/patch-smart-coding-omlx.mjs" ]]; then
+        node "${ai_dir}/scripts/patch-smart-coding-omlx.mjs" "$sc_pkg" >/dev/null 2>&1
+      fi
+      _ok "smart-coding-mcp available ${c_dim}(private; embeddings on oMLX bge-m3)${c_reset}"
+    else
+      _warn "smart-coding-mcp (oMLX) not installed — RAG disabled"
+      _info "Install: ${c_dim}npm install --prefix ${sc_omlx_dir} smart-coding-mcp${c_reset}"
+    fi
   fi
 
   # ── Memory check (opencode-mem plugin) ─────────────────────────────
@@ -678,9 +691,13 @@ ai() {
   # OPENCODE_MEM_MODEL points the opencode-mem summarizer at the SAME model this
   # session runs (read by the patched config.js), so auto-capture never loads a second
   # ~20-28GB model alongside -l and thrashes the memory guard into a 507 loop.
+  # OPENCODE_CONFIG_CONTENT is an inline config opencode deep-merges last; under -l it
+  # carries {enabled:false} for every MCP server (built above), and is empty otherwise
+  # (empty = ignored by opencode, so the default keeps its MCPs).
   ADVISOR_EGRESS_LOG="$advisor_egress_log" \
   OPENCODE_MEM_EXCLUDE_DIRS="${OPENCODE_MEM_EXCLUDE_DIRS:-}" \
   OPENCODE_MEM_MODEL="$model_id" \
+  OPENCODE_CONFIG_CONTENT="$oc_config_content" \
   opencode -m "${oc_provider}/${oc_model}" "${passthrough_args[@]}"
   return $?
 }
