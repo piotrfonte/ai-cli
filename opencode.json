@@ -1,6 +1,6 @@
 {
   "$schema": "https://opencode.ai/config.json",
-  "disabled_providers": ["opencode"],
+  "disabled_providers": ["opencode", "gitlab"],
   "autoupdate": "notify",
   "plugin": ["opencode-mem"],
   "provider": {
@@ -30,11 +30,19 @@
             "context": 49152,
             "output": 8192
           }
+        },
+        "mlx-community/gemma-4-12B-it-qat-OptiQ-4bit": {
+          "name": "Gemma 4 12B QAT+OptiQ 4-bit",
+          "temperature": false,
+          "limit": {
+            "context": 65536,
+            "output": 8192
+          }
         }
       }
     }
   },
-  "model": "mlx/mlx-community/Qwen3.6-35B-A3B-6bit",
+  "model": "vercel/alibaba/qwen3.8-max",
   "default_agent": "build",
   "watcher": {
     "ignore": ["node_modules/**", "dist/**", "build/**", ".next/**", "*.log"]

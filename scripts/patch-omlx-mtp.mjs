@@ -34,6 +34,19 @@ const SETTINGS_VERSION = 1;
 // the model ids in ai.sh (_model_lite) and opencode.json.
 const DESIRED = {
   "Jundot/Qwen3.6-35B-A3B-oQ6-mtp": { mtp_enabled: true },
+  // Gemma 4 12B (ai -g) — force thinking OFF. Its chat template defaults to
+  // off (`enable_thinking | default(false)`) and oMLX's own
+  // detect_thinking_default() correctly reports False for it, but that
+  // detection is NOT wired into the /v1/chat/completions path: enable_thinking
+  // is only injected into the template kwargs when a thinking budget is set,
+  // and the endpoint ends up thinking anyway. Measured: an unqualified chat
+  // request returns 100% reasoning_content and EMPTY content, running to the
+  // max_tokens cap without ever answering (verified at 400 / 600 / 2000
+  // tokens). The same prompt rendered by hand and sent to /v1/completions
+  // answers directly — so this is the chat endpoint's default, not the weights.
+  // ms.enable_thinking takes precedence over chat_template_kwargs
+  // (omlx/server.py), which makes this the one reliable place to pin it.
+  "mlx-community/gemma-4-12B-it-qat-OptiQ-4bit": { enable_thinking: false },
 };
 
 const file = process.argv[2] || `${homedir()}/.omlx/model_settings.json`;
@@ -54,16 +67,29 @@ if (existsSync(file)) {
   }
 }
 
+// oMLX keys its settings by the id it RESOLVED the request to, which is the
+// model's directory name under --model-dir — the bare leaf, not the two-level
+// <namespace>/<name> id we send. EnginePool.resolve_model_id() looks the
+// incoming id up in its entries, misses on "mlx-community/foo", then strips the
+// text before the first "/" and retries — matching the entry "foo". So a
+// settings entry keyed by the two-level id is NEVER consulted (verified live:
+// enable_thinking under the two-level key had no effect; under the leaf it took
+// hold). Write both spellings: the leaf is what actually matches today, and the
+// two-level key is harmless insurance if oMLX ever registers namespaced ids.
+const expandKeys = (id) => (id.includes("/") ? [id, id.slice(id.indexOf("/") + 1)] : [id]);
+
 let changed = false;
 for (const [modelId, keys] of Object.entries(DESIRED)) {
-  const entry = data.models[modelId] || {};
-  for (const [k, v] of Object.entries(keys)) {
-    if (entry[k] !== v) {
-      entry[k] = v;
-      changed = true;
+  for (const alias of expandKeys(modelId)) {
+    const entry = data.models[alias] || {};
+    for (const [k, v] of Object.entries(keys)) {
+      if (entry[k] !== v) {
+        entry[k] = v;
+        changed = true;
+      }
     }
+    data.models[alias] = entry;
   }
-  data.models[modelId] = entry;
 }
 
 if (!changed) {

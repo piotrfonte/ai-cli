@@ -75,6 +75,12 @@ ai() {
   local omlx_cache_dir="${OMLX_CACHE_DIR:-${HOME}/.omlx/cache}"
   local omlx_hot_cache="${OMLX_HOT_CACHE:-8GB}"       # in-RAM hot KV tier; model+tier must stay under the guard's soft threshold (85%)
   local omlx_ssd_cache_max="${OMLX_SSD_CACHE_MAX:-40GB}"    # disk cap; oMLX defaults to nearly all free space
+  # oMLX's own LRU governs only the *live* index, so blocks orphaned by prior
+  # runs/model-quant switches leak on disk far over the cap (observed: 122 GB vs
+  # a 40 GB cap). Prune the on-disk cache to this many GB at each server (re)start
+  # — safe because _start_server only runs while no oMLX server is up. Default:
+  # the numeric part of the SSD cap. Set 0 to disable pruning.
+  local omlx_cache_prune_gb="${OMLX_CACHE_PRUNE_GB:-${omlx_ssd_cache_max//[!0-9]/}}"
   local omlx_memory_guard_gb="${OMLX_MEMORY_GUARD_GB:-48}"  # ceiling on 64 GB box
   local omlx_max_concurrent="${OMLX_MAX_CONCURRENT:-2}"     # continuous batching: 1 coding turn + 1 opencode-mem summarizer
 
@@ -102,6 +108,21 @@ ai() {
     model_id="Jundot/Qwen3.6-35B-A3B-oQ6-mtp"
     model_label="Qwen 3.6 35B-A3B oQ6 +MTP (lite)"
     model_context_limit=49152
+  }
+
+  # Opt-in via -g/--gemma: Gemma 4 12B instruct, QAT base + OptiQ
+  # mixed-precision 4-bit (329 per-layer overrides, not a flat quant). 9 GB on
+  # disk, ~11 GB resident at 65 k — a third of the Qwen default. But it's a
+  # DENSE 12B against Qwen's 35B-A3B MoE (~3B active), so every token reads all
+  # ~9 GB of weights: expect slower decode despite the smaller footprint. KV is
+  # near-free (40 of 48 layers are sliding-window 1024 → ~335 MB fixed; the 8
+  # global layers share one K/V tensor → ~8 KB/token ⇒ ~0.9 GB at 65 k), so the
+  # 65 k cap matches the default for a clean single-variable comparison rather
+  # than tracking any memory limit.
+  _model_gemma() {
+    model_id="mlx-community/gemma-4-12B-it-qat-OptiQ-4bit"
+    model_label="Gemma 4 12B QAT+OptiQ 4-bit"
+    model_context_limit=65536
   }
 
   local oc_provider="mlx"
@@ -216,6 +237,7 @@ ai() {
     echo ""
     printf "  ${c_bold}Options:${c_reset}\n"
     printf "    ${c_cyan}-l,     --lite${c_reset}        Use the oQ6 +MTP quant ${c_dim}(speculative decode, 49k ctx, no MCPs)${c_reset}\n"
+    printf "    ${c_cyan}-g,     --gemma${c_reset}       Use Gemma 4 12B QAT+OptiQ 4-bit ${c_dim}(dense 12B, ~11 GB resident, 65k ctx)${c_reset}\n"
     printf "    ${c_cyan}--no-hybrid${c_reset}          Disable the cloud-Claude ${c_bold}@advisor${c_reset} subagent ${c_dim}(on by default)${c_reset}\n"
     printf "    ${c_cyan}-k,     --kill${c_reset}       Kill the oMLX server\n"
     printf "    ${c_cyan}-h,     --help${c_reset}       Show this help\n"
@@ -223,6 +245,7 @@ ai() {
     printf "  ${c_bold}Model:${c_reset}\n"
     printf "    ${c_dim}Qwen 3.6 35B-A3B 6-bit (local, default)${c_reset}\n"
     printf "    ${c_dim}Qwen 3.6 35B-A3B oQ6 +MTP (local, via -l)${c_reset}\n"
+    printf "    ${c_dim}Gemma 4 12B QAT+OptiQ 4-bit (local, via -g)${c_reset}\n"
     echo ""
   }
 
@@ -258,7 +281,7 @@ ai() {
     _box_line " ${c_bold}Downloading model${c_reset}"
     _box_mid
     _box_line " ${c_dim}${model_id}${c_reset}"
-    _box_line " ${c_dim}one-time download (20–30 GB) — progress below${c_reset}"
+    _box_line " ${c_dim}one-time download (9–30 GB depending on model) — progress below${c_reset}"
     _box_bottom
     echo ""
 
@@ -301,6 +324,33 @@ ai() {
     _ok "Model ready ${c_dim}(${target})${c_reset}"
   }
 
+  # ── Prune the paged SSD KV cache to the cap ────────────────────────────
+  # oMLX's LRU eviction only tracks blocks in its *live* index; blocks orphaned
+  # by earlier runs or model/quant switches are never revisited, so the on-disk
+  # footprint drifts far past --paged-ssd-cache-max-size. Enforce the cap here by
+  # deleting oldest-first (mtime = LRU, matching oMLX's own intent) until under
+  # target. Only ever called from _start_server with the server down, so no live
+  # process holds these blocks; a block is content-addressed, so a later cache
+  # lookup for a deleted one is just a miss → recompute (the safe failure mode).
+  _prune_cache() {
+    local dir=$1 max_gb=$2
+    [[ -d "$dir" && -n "$max_gb" && "$max_gb" -gt 0 ]] 2>/dev/null || return 0
+    find "$dir" -name '.DS_Store' -type f -delete 2>/dev/null   # Finder cruft
+    local max_bytes=$(( max_gb * 1024 * 1024 * 1024 )) cur_bytes
+    cur_bytes=$(( $(du -sk "$dir" 2>/dev/null | awk '{print $1+0}') * 1024 ))
+    (( cur_bytes > max_bytes )) || return 0
+    _info "Pruning KV cache: $(awk -v b="$cur_bytes" 'BEGIN{printf "%.1f", b/1073741824}')GB on disk over ${max_gb}GB cap (oMLX LRU left orphans)"
+    local removed=0 reclaimed=0 mtime size path
+    while IFS=' ' read -r mtime size path; do
+      (( cur_bytes > max_bytes )) || break
+      [[ -n "$path" ]] || continue
+      if rm -f "$path" 2>/dev/null; then
+        cur_bytes=$(( cur_bytes - size )); reclaimed=$(( reclaimed + size )); removed=$(( removed + 1 ))
+      fi
+    done < <(find "$dir" -type f ! -name '.DS_Store' -exec stat -f '%m %z %N' {} + 2>/dev/null | sort -n)
+    _ok "Reclaimed $(awk -v b="$reclaimed" 'BEGIN{printf "%.1f", b/1073741824}')GB from KV cache ${c_dim}(${removed} stale blocks, now ≤${max_gb}GB)${c_reset}"
+  }
+
   # ── Start inference server ────────────────────────────────────────────
   _start_server() {
     echo ""
@@ -315,6 +365,7 @@ ai() {
     echo ""
 
     mkdir -p "$(dirname "$state_file")" "$omlx_cache_dir" "$omlx_model_dir"
+    _prune_cache "$omlx_cache_dir" "$omlx_cache_prune_gb"
     local log_dir="${ai_log_dir}"
     mkdir -p "$log_dir"
     find "$log_dir" -maxdepth 1 -type f -name '*.log' -mtime +14 -delete 2>/dev/null
@@ -435,7 +486,7 @@ ai() {
 
   # ── Main logic ───────────────────────────────────────────────────────
   local action=""               # "" | "kill" | "help"
-  local profile="default"       # "default" (35B-A3B 6-bit) | "lite" (35B-A3B oQ6 +MTP)
+  local profile="default"       # "default" (35B-A3B 6-bit) | "lite" (35B-A3B oQ6 +MTP) | "gemma" (Gemma 4 12B QAT+OptiQ)
   local hybrid=1                # cloud-Claude @advisor subagent ON by default; disable with --no-hybrid
   local -a passthrough_args=()
 
@@ -450,7 +501,23 @@ ai() {
         shift
         ;;
       -l|--lite)
+        if [[ "$profile" != "default" && "$profile" != "lite" ]]; then
+          _err "Conflicting model flags: --${profile} and $1"
+          _show_help
+          return 1
+        fi
         profile="lite"
+        shift
+        ;;
+      -g|--gemma|-gemma)
+        # Model flags are mutually exclusive — picking the wrong one silently
+        # costs a multi-GB download or a server restart, so fail loudly.
+        if [[ "$profile" != "default" && "$profile" != "gemma" ]]; then
+          _err "Conflicting model flags: --${profile} and $1"
+          _show_help
+          return 1
+        fi
+        profile="gemma"
         shift
         ;;
       -hybrid|--hybrid)
@@ -477,6 +544,7 @@ ai() {
   # ── Select model profile (local default) ─────────────────────────────
   case "$profile" in
     lite)  _model_lite ;;
+    gemma) _model_gemma ;;
     *)     _model_qwen ;;
   esac
   local oc_model="$model_id"
@@ -492,7 +560,7 @@ ai() {
 
   # Pull the selected model eagerly so the server never lazy-fails on a
   # missing download (a first `ai` fetches the 6-bit default; a first `ai -l`
-  # fetches the oQ6-mtp weights).
+  # fetches the oQ6-mtp weights; a first `ai -g` fetches Gemma 4 12B).
   _ensure_model || return 1
 
   # Enable per-model oMLX settings that aren't server CLI flags: MTP
@@ -677,6 +745,19 @@ ai() {
     rm -f "$advisor_dst" "$egress_dst" 2>/dev/null
   fi
 
+  # Clean up scraps from the removed AFK experiment (agents, loop plugin and the
+  # /lock command), so a stale symlink or leftover file can never re-introduce an
+  # auto-driving agent into a normal session. Safe on every launch.
+  rm -f "${HOME}/.config/opencode/agents/afk.md" \
+        "${HOME}/.config/opencode/agents/afk-impl.md" \
+        "${HOME}/.config/opencode/agents/afk-planner.md" \
+        "${HOME}/.config/opencode/agents/afk-cagetest.md" \
+        "${HOME}/.config/opencode/agents/grill.md" \
+        "${HOME}/.config/opencode/plugins/afk-loop.js" \
+        "${HOME}/.config/opencode/command/lock.md" \
+        "${HOME}/.config/opencode/command/afk.md" \
+        "${HOME}/.config/opencode/command/afk-issue.md" 2>/dev/null
+
   # ── Launch frontend ──────────────────────────────────────────────────
   echo ""
   cd "$caller_dir" || return 1
@@ -694,6 +775,10 @@ ai() {
   # OPENCODE_CONFIG_CONTENT is an inline config opencode deep-merges last; under -l it
   # carries {enabled:false} for every MCP server (built above), and is empty otherwise
   # (empty = ignored by opencode, so the default keeps its MCPs).
+  #
+  # The explicit `-m mlx/<id>` is what makes `ai` local regardless of opencode.json's
+  # default model (now a Vercel AI Gateway model, for bare `opencode` sessions): the
+  # CLI flag wins over the config, so every ai/-l/-g launch pins its own local model.
   ADVISOR_EGRESS_LOG="$advisor_egress_log" \
   OPENCODE_MEM_EXCLUDE_DIRS="${OPENCODE_MEM_EXCLUDE_DIRS:-}" \
   OPENCODE_MEM_MODEL="$model_id" \
