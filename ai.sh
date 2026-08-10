@@ -630,6 +630,28 @@ ai() {
       if command -v node >/dev/null 2>&1 && [[ -f "${ai_dir}/scripts/patch-smart-coding-omlx.mjs" ]]; then
         node "${ai_dir}/scripts/patch-smart-coding-omlx.mjs" "$sc_pkg" >/dev/null 2>&1
       fi
+      # Keep third-party trees out of the index. smart-coding-mcp builds its final
+      # exclude list from ProjectDetector alone (its own DEFAULT_CONFIG list is
+      # discarded, and in --workspace mode the package config.json is never read),
+      # and the detector only emits a language's ignore patterns when it detects
+      # that language — while "py" is unconditionally indexable. So a JS repo with
+      # a stray .venv indexes the whole virtualenv: measured 4,348 of 5,115 files
+      # and 94.5% of all chunks on one client repo, which pinned oMLX at >100% CPU
+      # for hours embedding library source one HTTP request per chunk. The patch
+      # adds a SMART_CODING_EXCLUDE_PATTERNS override applied last in loadConfig();
+      # its built-in virtualenv set needs no configuration. Idempotent.
+      if command -v node >/dev/null 2>&1 && [[ -f "${ai_dir}/scripts/patch-smart-coding-excludes.mjs" ]]; then
+        node "${ai_dir}/scripts/patch-smart-coding-excludes.mjs" "$sc_pkg" >/dev/null 2>&1
+      fi
+      # Exported (not set in opencode.json) so they can be tuned per-box from ai.env;
+      # opencode merges its MCP `environment` block over the inherited env, so leaving
+      # these unset simply keeps the patch's built-in virtualenv defaults in force.
+      if [[ -n "${SMART_CODING_EXCLUDE_PATTERNS:-}" ]]; then
+        export SMART_CODING_EXCLUDE_PATTERNS
+      fi
+      if [[ -n "${SMART_CODING_EXCLUDE_DEFAULTS:-}" ]]; then
+        export SMART_CODING_EXCLUDE_DEFAULTS
+      fi
       _ok "smart-coding-mcp available ${c_dim}(private; embeddings on oMLX bge-m3)${c_reset}"
     else
       _warn "smart-coding-mcp (oMLX) not installed — RAG disabled"
