@@ -52,7 +52,12 @@ ai() {
   local ai_state_dir="${AI_STATE_DIR:-${HOME}/.local/state}"
 
   # ── MLX model config ──────────────────────────────────────────────────
+  # Each profile sets all six: the served id/label/context, plus the oMLX venv it
+  # needs, its KV-cache directory and that cache's budget in GB. The last three
+  # are per-profile because Muse Glimmer requires a much newer oMLX than the
+  # Qwen/Gemma profiles run, and the two versions cannot share a cache directory.
   local model_id model_label model_context_limit
+  local model_omlx_venv model_cache_dir model_cache_gb
   local server_port="${AI_PORT:-10081}"
   local state_file="${ai_state_dir}/omlx-model"
   local pid_file="${ai_state_dir}/omlx-server.pid"
@@ -63,26 +68,55 @@ ai() {
   # (hot RAM + cold SSD) that restores recurring prefixes from disk instead of
   # recomputing them — the agentic-coding win. Built from source into a venv;
   # see CLAUDE.md for the build steps.
-  local omlx_bin="${OMLX_BIN:-}"
-  if [[ -z "$omlx_bin" ]]; then
-    if command -v omlx >/dev/null 2>&1; then
-      omlx_bin="omlx"
-    else
-      omlx_bin="${HOME}/.omlx/venv/bin/omlx"
-    fi
-  fi
+  #
+  # Only the profile-independent settings live here. The binary, the KV-cache
+  # directory and that cache's budget depend on which model runs, so they are
+  # resolved in _resolve_runtime() after the profile dispatch below.
   local omlx_model_dir="${OMLX_MODEL_DIR:-${HOME}/.omlx/models}"
-  local omlx_cache_dir="${OMLX_CACHE_DIR:-${HOME}/.omlx/cache}"
   local omlx_hot_cache="${OMLX_HOT_CACHE:-8GB}"       # in-RAM hot KV tier; model+tier must stay under the guard's soft threshold (85%)
-  local omlx_ssd_cache_max="${OMLX_SSD_CACHE_MAX:-40GB}"    # disk cap; oMLX defaults to nearly all free space
-  # oMLX's own LRU governs only the *live* index, so blocks orphaned by prior
-  # runs/model-quant switches leak on disk far over the cap (observed: 122 GB vs
-  # a 40 GB cap). Prune the on-disk cache to this many GB at each server (re)start
-  # — safe because _start_server only runs while no oMLX server is up. Default:
-  # the numeric part of the SSD cap. Set 0 to disable pruning.
-  local omlx_cache_prune_gb="${OMLX_CACHE_PRUNE_GB:-${omlx_ssd_cache_max//[!0-9]/}}"
   local omlx_memory_guard_gb="${OMLX_MEMORY_GUARD_GB:-48}"  # ceiling on 64 GB box
   local omlx_max_concurrent="${OMLX_MAX_CONCURRENT:-2}"     # continuous batching: 1 coding turn + 1 opencode-mem summarizer
+
+  # Filled by _resolve_runtime(); every reader runs after the profile dispatch.
+  local omlx_bin="" omlx_cache_dir="" omlx_ssd_cache_max="" omlx_cache_prune_gb=""
+
+  # Resolve the per-profile runtime. Environment overrides win over the profile,
+  # so a box with one oMLX build can still pin OMLX_BIN / OMLX_CACHE_DIR globally.
+  #
+  # The profile's own venv is preferred over an `omlx` on PATH: a PATH build is
+  # whatever was installed last, and running Muse Glimmer on the older oMLX simply
+  # fails (that architecture landed 2190 commits after the pinned build).
+  #
+  # The two oMLX versions must not share --paged-ssd-cache-dir. Note the reason:
+  # it is NOT the cache format. Both builds define _CACHE_FORMAT_VERSION = "3",
+  # and the new one writes "3" too unless gdn_ssd_split_enabled (default off) or
+  # a PoolingCache delta applies — and a rejected block is only a cache miss.
+  # The real reason is mutual eviction: both servers prune their directory
+  # oldest-first down to THEIR OWN budget at every start, so one shared directory
+  # means each start deletes the other's warm blocks. That destroys the
+  # prefix-cache win that collapses agentic time-to-first-token from ~30s to ~1s.
+  #
+  # oMLX's own LRU governs only the *live* index, so blocks orphaned by prior
+  # runs/model-quant switches leak on disk far over the cap (observed: 122 GB vs
+  # a 40 GB cap). _prune_cache enforces the budget at each server (re)start —
+  # safe because _start_server only runs while no oMLX server is up. The server
+  # cap and the prune target come from the same number so they cannot disagree.
+  # Set OMLX_CACHE_PRUNE_GB=0 to disable pruning.
+  _resolve_runtime() {
+    omlx_bin="${OMLX_BIN:-}"
+    if [[ -z "$omlx_bin" ]]; then
+      if [[ -x "${model_omlx_venv}/bin/omlx" ]]; then
+        omlx_bin="${model_omlx_venv}/bin/omlx"
+      elif command -v omlx >/dev/null 2>&1; then
+        omlx_bin="omlx"
+      else
+        omlx_bin="${model_omlx_venv}/bin/omlx"   # missing: _check_deps reports this path
+      fi
+    fi
+    omlx_cache_dir="${OMLX_CACHE_DIR:-$model_cache_dir}"
+    omlx_ssd_cache_max="${OMLX_SSD_CACHE_MAX:-${model_cache_gb}GB}"
+    omlx_cache_prune_gb="${OMLX_CACHE_PRUNE_GB:-${omlx_ssd_cache_max//[!0-9]/}}"
+  }
 
   # ── Model profile ────────────────────────────────────────────────────
   # model_id must match a model oMLX serves from --model-dir (the two-level
@@ -94,6 +128,9 @@ ai() {
     model_id="mlx-community/Qwen3.6-35B-A3B-6bit"
     model_label="Qwen 3.6 35B-A3B 6-bit"
     model_context_limit=65536
+    model_omlx_venv="${HOME}/.omlx/venv"
+    model_cache_dir="${HOME}/.omlx/cache"
+    model_cache_gb=15
   }
 
   # Opt-in via -l/--lite: the same A3B model in oMLX's native oQ6 quant
@@ -108,6 +145,9 @@ ai() {
     model_id="Jundot/Qwen3.6-35B-A3B-oQ6-mtp"
     model_label="Qwen 3.6 35B-A3B oQ6 +MTP (lite)"
     model_context_limit=49152
+    model_omlx_venv="${HOME}/.omlx/venv"
+    model_cache_dir="${HOME}/.omlx/cache"
+    model_cache_gb=15
   }
 
   # Opt-in via -g/--gemma: Gemma 4 12B instruct, QAT base + OptiQ
@@ -123,6 +163,39 @@ ai() {
     model_id="mlx-community/gemma-4-12B-it-qat-OptiQ-4bit"
     model_label="Gemma 4 12B QAT+OptiQ 4-bit"
     model_context_limit=65536
+    model_omlx_venv="${HOME}/.omlx/venv"
+    model_cache_dir="${HOME}/.omlx/cache"
+    model_cache_gb=15
+  }
+
+  # Opt-in via --muse: Meta Muse Glimmer 30B in oMLX's native oQ4e quant — a
+  # 4-bit floor with per-layer overrides placed by an importance matrix that was
+  # calibrated on code, built by the oMLX author with oMLX 0.5.8.dev1. 20.3 GB on
+  # disk. This profile is UNPROVEN; it exists to measure, not because it is known
+  # to beat Qwen. Three facts govern it:
+  #
+  #  1. It needs a NEWER oMLX. Muse Glimmer support landed 2190 commits after the
+  #     build the other profiles run, so this profile alone uses ~/.omlx/venv-next
+  #     (built from ~/.omlx/src-next). The Qwen and Gemma profiles keep the pinned
+  #     build untouched, which is what makes a rollback real.
+  #  2. It is a DENSE 30B, not a MoE. Every decoded token reads all the weights,
+  #     against ~3B active parameters for Qwen 35B-A3B. Expect much slower decode.
+  #  3. Long-range recall is structurally weak: only 13 of 52 layers are
+  #     full_attention, the other 39 are sliding-window 2048. This is the same
+  #     caveat as Gemma (8 of 48, window 1024), but over a longer model.
+  #
+  # KV is cheap (2 KV heads, ~13 KB/token ⇒ ~0.85 GB at 65 k), so the 65 k cap
+  # matches the Qwen default for a clean single-variable comparison rather than
+  # tracking any memory limit. The weights carry a vision tower (~0.9 GB) that is
+  # never used: oMLX always routes muse_glimmer through the VLM engine and no
+  # runtime flag skips it. Accepted as dead weight — see CLAUDE.md.
+  _model_muse() {
+    model_id="Jundot/Muse-Glimmer-30B-oQ4e"
+    model_label="Muse Glimmer 30B oQ4e"
+    model_context_limit=65536
+    model_omlx_venv="${HOME}/.omlx/venv-next"
+    model_cache_dir="${HOME}/.omlx/cache-next"
+    model_cache_gb=25
   }
 
   local oc_provider="mlx"
@@ -238,6 +311,7 @@ ai() {
     printf "  ${c_bold}Options:${c_reset}\n"
     printf "    ${c_cyan}-l,     --lite${c_reset}        Use the oQ6 +MTP quant ${c_dim}(speculative decode, 49k ctx, no MCPs)${c_reset}\n"
     printf "    ${c_cyan}-g,     --gemma${c_reset}       Use Gemma 4 12B QAT+OptiQ 4-bit ${c_dim}(dense 12B, ~11 GB resident, 65k ctx)${c_reset}\n"
+    printf "    ${c_cyan}        --muse${c_reset}        Use Muse Glimmer 30B oQ4e ${c_dim}(dense 30B, newer oMLX, 65k ctx — unproven)${c_reset}\n"
     printf "    ${c_cyan}--no-hybrid${c_reset}          Disable the cloud-Claude ${c_bold}@advisor${c_reset} subagent ${c_dim}(on by default)${c_reset}\n"
     printf "    ${c_cyan}-k,     --kill${c_reset}       Kill the oMLX server\n"
     printf "    ${c_cyan}-h,     --help${c_reset}       Show this help\n"
@@ -246,6 +320,7 @@ ai() {
     printf "    ${c_dim}Qwen 3.6 35B-A3B 6-bit (local, default)${c_reset}\n"
     printf "    ${c_dim}Qwen 3.6 35B-A3B oQ6 +MTP (local, via -l)${c_reset}\n"
     printf "    ${c_dim}Gemma 4 12B QAT+OptiQ 4-bit (local, via -g)${c_reset}\n"
+    printf "    ${c_dim}Muse Glimmer 30B oQ4e (local, via --muse; runs ~/.omlx/venv-next)${c_reset}\n"
     echo ""
   }
 
@@ -361,6 +436,7 @@ ai() {
     _box_line " ${c_dim}${model_id}${c_reset}"
     _box_line " ${c_bold}Port:${c_reset}  ${server_port}"
     _box_line " ${c_bold}KV:${c_reset}    hot ${omlx_hot_cache} + SSD ≤${omlx_ssd_cache_max} ${c_dim}${omlx_cache_dir}${c_reset}"
+    _box_line " ${c_bold}oMLX:${c_reset}  ${c_dim}${omlx_bin}${c_reset}"
     _box_bottom
     echo ""
 
@@ -418,7 +494,11 @@ ai() {
       if _server_healthy; then
         printf "\r                                                    \r"
         _ok "Server ready ${c_dim}(PID ${server_pid}, took ${elapsed}s)${c_reset}"
-        printf "%s\n" "$model_id" > "$state_file"
+        # Line 1: served model id. Line 2: the oMLX binary serving it. The binary
+        # matters as much as the model now that profiles run different oMLX
+        # builds — the pinned build cannot serve Muse Glimmer at all, so a
+        # same-model/different-binary case must still force a restart.
+        printf "%s\n%s\n" "$model_id" "$omlx_bin" > "$state_file"
         trap - INT
         return 0
       fi
@@ -475,18 +555,42 @@ ai() {
       missing=1
     fi
     if [[ ! -x "$omlx_bin" ]] && ! command -v omlx >/dev/null 2>&1; then
+      # Name the venv this profile expects, and the matching source checkout.
+      # --muse needs the second, newer pair; every other profile needs the pinned
+      # one. Telling the user to build the wrong one wastes a long build.
+      local src_dir="${HOME}/.omlx/src"
+      [[ "$model_omlx_venv" == *"-next" ]] && src_dir="${HOME}/.omlx/src-next"
       _err "Missing dependency: ${c_bold}omlx${c_reset} (expected at ${c_dim}${omlx_bin}${c_reset})"
-      _info "Build: ${c_dim}git clone https://github.com/jundot/omlx ~/.omlx/src \\"
-      _info "  && uv venv ~/.omlx/venv --python 3.12 \\"
-      _info "  && VIRTUAL_ENV=~/.omlx/venv uv pip install -e ~/.omlx/src${c_reset}"
+      _info "Build: ${c_dim}git clone https://github.com/jundot/omlx ${src_dir} \\"
+      _info "  && uv venv ${model_omlx_venv} --python 3.12 \\"
+      _info "  && VIRTUAL_ENV=${model_omlx_venv} uv pip install -e ${src_dir}${c_reset}"
       missing=1
+    fi
+    # A PATH fallback is fine for the pinned profiles — someone may have oMLX
+    # installed outside ~/.omlx/venv. It is NOT fine for --muse: the older build
+    # has no muse_glimmer support at all, so the launcher would report success
+    # and oMLX would only fail later, at model load, where the cause is far less
+    # obvious. Catch it here. An explicit OMLX_BIN is a deliberate choice, so
+    # that only warns; an accidental PATH fallback is a hard error.
+    if [[ "$profile" == "muse" && "$omlx_bin" != "${model_omlx_venv}/bin/omlx" ]]; then
+      if [[ -n "${OMLX_BIN:-}" ]]; then
+        _warn "OMLX_BIN points --muse at ${c_dim}${omlx_bin}${c_reset}, not ${c_dim}${model_omlx_venv}/bin/omlx${c_reset}"
+        _info "Muse Glimmer needs oMLX ≥0.5.8; the pinned 0.4.2rc1 cannot load it."
+      else
+        _err "--muse needs the newer oMLX at ${c_dim}${model_omlx_venv}/bin/omlx${c_reset} (resolved: ${c_dim}${omlx_bin}${c_reset})"
+        _info "Muse Glimmer support landed 2190 commits after the pinned build — the older one cannot load it."
+        _info "Build: ${c_dim}git clone https://github.com/jundot/omlx ${HOME}/.omlx/src-next \\"
+        _info "  && uv venv ${model_omlx_venv} --python 3.12 \\"
+        _info "  && VIRTUAL_ENV=${model_omlx_venv} uv pip install -e ${HOME}/.omlx/src-next${c_reset}"
+        missing=1
+      fi
     fi
     return $missing
   }
 
   # ── Main logic ───────────────────────────────────────────────────────
   local action=""               # "" | "kill" | "help"
-  local profile="default"       # "default" (35B-A3B 6-bit) | "lite" (35B-A3B oQ6 +MTP) | "gemma" (Gemma 4 12B QAT+OptiQ)
+  local profile="default"       # "default" (35B-A3B 6-bit) | "lite" (35B-A3B oQ6 +MTP) | "gemma" (Gemma 4 12B QAT+OptiQ) | "muse" (Muse Glimmer 30B oQ4e)
   local hybrid=1                # cloud-Claude @advisor subagent ON by default; disable with --no-hybrid
   local -a passthrough_args=()
 
@@ -520,6 +624,15 @@ ai() {
         profile="gemma"
         shift
         ;;
+      --muse|-muse)
+        if [[ "$profile" != "default" && "$profile" != "muse" ]]; then
+          _err "Conflicting model flags: --${profile} and $1"
+          _show_help
+          return 1
+        fi
+        profile="muse"
+        shift
+        ;;
       -hybrid|--hybrid)
         hybrid=1
         shift
@@ -545,8 +658,10 @@ ai() {
   case "$profile" in
     lite)  _model_lite ;;
     gemma) _model_gemma ;;
+    muse)  _model_muse ;;
     *)     _model_qwen ;;
   esac
+  _resolve_runtime
   local oc_model="$model_id"
 
   case "$action" in
@@ -560,7 +675,8 @@ ai() {
 
   # Pull the selected model eagerly so the server never lazy-fails on a
   # missing download (a first `ai` fetches the 6-bit default; a first `ai -l`
-  # fetches the oQ6-mtp weights; a first `ai -g` fetches Gemma 4 12B).
+  # fetches the oQ6-mtp weights; a first `ai -g` fetches Gemma 4 12B; a first
+  # `ai --muse` fetches the 20.3 GB Muse Glimmer oQ4e weights).
   _ensure_model || return 1
 
   # Enable per-model oMLX settings that aren't server CLI flags: MTP
@@ -580,13 +696,22 @@ ai() {
 
   if [[ -n "$running_pid" ]]; then
     if _server_healthy; then
-      local running_model=""
+      local running_model="" running_bin=""
       if [[ -f "$state_file" ]]; then
-        IFS= read -r running_model < "$state_file"
+        { IFS= read -r running_model; IFS= read -r running_bin; } < "$state_file" 2>/dev/null
       fi
       if [[ "$running_model" != "$model_id" ]]; then
         _warn "Server running with different model (${running_model:-unknown})"
         _info "Switching to ${c_bold}${model_label}${c_reset}"
+        _kill_server
+        _start_server || return 1
+      elif [[ "$running_bin" != "$omlx_bin" ]]; then
+        # Same model, different oMLX build — or a state file written before the
+        # binary was recorded, where we cannot tell. Restart either way: the
+        # profiles now run oMLX versions 2190 commits apart, and guessing wrong
+        # means serving a model the running build does not implement.
+        _warn "Server running from a different oMLX build (${running_bin:-unrecorded})"
+        _info "Restarting on ${c_dim}${omlx_bin}${c_reset}"
         _kill_server
         _start_server || return 1
       else

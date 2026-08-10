@@ -38,6 +38,14 @@
             "context": 65536,
             "output": 8192
           }
+        },
+        "Jundot/Muse-Glimmer-30B-oQ4e": {
+          "name": "Muse Glimmer 30B oQ4e",
+          "temperature": false,
+          "limit": {
+            "context": 65536,
+            "output": 8192
+          }
         }
       }
     }
