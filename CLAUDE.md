@@ -112,6 +112,27 @@ Hence `cache-next`. The two budgets sum to the 40 GB the single cache used befor
 
 **Phase-1 smoke test (not the measurement).** The new build serves the model and the two-level id resolves: a request for `Jundot/Muse-Glimmer-30B-oQ4e` is matched to the `Muse-Glimmer-30B-oQ4e` directory leaf that `/v1/models` actually lists, and the response echoes the two-level id back. Cold model load **5.34 s**. Decode **~21.5–21.9 tok/s** on trivial prompts — above the ≥15 tok/s gate, but on ~60-token prompts with no KV, so it is not a substitute for a real agentic turn. Cache isolation holds: a `--muse` server writes only to `cache-next` and left the 22 GB `cache` untouched. Resident memory was **not** measured — MLX allocates through Metal unified memory, so `ps` RSS reported 2.77 GB against a 20.3 GB model and is meaningless here.
 
+**Measured on real agentic turns — prefill is the cost, not decode.** From `logs/omlx-server-*.log` on a live opencode session at a 12.8k-token context:
+
+```
+277 tokens in 89.61s (18.7 tok/s), prompt: 12811     → ~75s prefill ≈ 171 tok/s
+187 tokens in 75.77s (16.1 tok/s), prompt: 12808     → ~64s prefill ≈ 200 tok/s
+```
+
+oMLX's reported tok/s is the **decode** rate, so subtract decode time to see prefill. Decode passes the ≥15 tok/s gate comfortably (15–22 tok/s throughout). But a single 12.8k-token turn costs **~64–75 s of prefill**, which is what makes the profile feel unusable — one user-visible turn took 1m 16s. This is the dense-30B caveat in numbers: every prefilled token reads all ~20 GB of weights, against ~3B active for Qwen 35B-A3B. **Treat prefill, not decode, as the gate for this profile.**
+
+**The prefix cache does not rescue it, because the prompt is not stable:**
+```
+prefix cache: re-prefills 10760 of 12808 tokens (reused 2048); closest stored
+sequence shares the first 3288 of 12288 comparable tokens before diverging
+```
+One 2048-token block reused out of 12808. Something rewrites the prompt head between turns, so 84% is recomputed at full price every turn. On this profile that is expensive in a way it is not on the MoE.
+
+**`--muse` therefore runs with `opencode-mem` disabled** (`ai.sh` appends the session directory to `OPENCODE_MEM_EXCLUDE_DIRS`, reusing the tested opt-out rather than adding a second mechanism). Two measured reasons, both specific to a dense 30B — the plugin stays on for every other profile:
+
+1. **Summarizer contention.** `OPENCODE_MEM_MODEL` points auto-capture at the *session* model, so on this profile the summarizer is the dense 30B. Two capture runs of 1364 and 1284 tokens took **146.8 s and 129.2 s**, holding one of the two concurrent slots for minutes. The interactive turn decoding against them fell to **10.2 tok/s** from ~20 solo.
+2. **Prefix churn.** Recall injection rewrites the head of the prompt — precisely what the prefix cache cannot absorb at ~200 tok/s prefill.
+
 **One trap worth knowing before you debug this profile.** At `max_tokens: 64` the model returns `content: None`, a full `reasoning_content`, and `finish_reason: length` — which looks exactly like the Gemma 4 failure recorded above. **It is not the same bug.** Raise the budget and it terminates normally: at 600 and 2000 tokens it returned `finish_reason: stop` with `content: "OK"` after ~340–400 characters of reasoning. Muse Glimmer simply reasons before answering, so any budget smaller than its reasoning prefix truncates mid-thought. Do not reach for `enable_thinking: false` on this evidence.
 
 **Reasoning is capped to `medium` via `model_settings.json` — measured, not guessed.** The template line is `reasoning_strength if reasoning_strength is defined and reasoning_strength else 'high'`, and opencode passes nothing, so the shipped default is **high**. Measured on "What are you?" against the live server:

@@ -910,6 +910,30 @@ ai() {
   echo ""
   cd "$caller_dir" || return 1
 
+  # --muse runs WITHOUT opencode-mem. Two measured reasons, both specific to a
+  # dense 30B; this is not a judgement on the plugin, which stays on everywhere else.
+  #
+  #  1. The summarizer runs the SESSION model (OPENCODE_MEM_MODEL below), which on
+  #     this profile is the dense 30B. Measured on one session: two capture runs of
+  #     1364 and 1284 tokens took 146.8s and 129.2s. They hold one of the two
+  #     concurrent slots for minutes, so an interactive turn decodes against
+  #     contention — the second one managed 10.2 tok/s against ~20 solo.
+  #  2. Recall injection rewrites the head of the prompt, and this profile can least
+  #     afford that. Prefill costs ~200 tok/s here, so the paged prefix cache is the
+  #     only thing making a 12.8k-token turn tolerable — and it reused just 2048 of
+  #     12808 tokens, diverging 3288 tokens in. Anything that perturbs the prefix
+  #     between turns is paid for at full prefill price.
+  #
+  # Implemented by appending the session directory to the exclude list the plugin
+  # already honours (patch-opencode-mem-exclude.mjs), rather than adding a second
+  # opt-out mechanism. That path is tested and covers capture, recall and
+  # post-compaction restore in one place. Any user-configured prefixes are kept.
+  local oc_mem_exclude="${OPENCODE_MEM_EXCLUDE_DIRS:-}"
+  if [[ "$profile" == "muse" ]]; then
+    oc_mem_exclude="${oc_mem_exclude:+${oc_mem_exclude}:}${caller_dir}"
+    _info "opencode-mem off for this session ${c_dim}(dense 30B: summarizer contention + prefix-cache churn)${c_reset}"
+  fi
+
   _info "Launching ${c_bold}opencode${c_reset} with ${c_bold}${oc_provider}/${oc_model}${c_reset}"
   echo ""
   # ADVISOR_EGRESS_LOG is empty unless -hybrid enabled the advisor; the egress-log
@@ -928,7 +952,7 @@ ai() {
   # default model (now a Vercel AI Gateway model, for bare `opencode` sessions): the
   # CLI flag wins over the config, so every ai/-l/-g launch pins its own local model.
   ADVISOR_EGRESS_LOG="$advisor_egress_log" \
-  OPENCODE_MEM_EXCLUDE_DIRS="${OPENCODE_MEM_EXCLUDE_DIRS:-}" \
+  OPENCODE_MEM_EXCLUDE_DIRS="$oc_mem_exclude" \
   OPENCODE_MEM_MODEL="$model_id" \
   OPENCODE_CONFIG_CONTENT="$oc_config_content" \
   opencode -m "${oc_provider}/${oc_model}" "${passthrough_args[@]}"
