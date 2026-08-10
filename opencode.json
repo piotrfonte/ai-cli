@@ -39,8 +39,8 @@
             "output": 8192
           }
         },
-        "Jundot/Muse-Glimmer-30B-oQ4e": {
-          "name": "Muse Glimmer 30B oQ4e",
+        "badtheorylabs/Macaw-4bit-MLX": {
+          "name": "Macaw 4-bit (LFM2.5-2.6B)",
           "temperature": false,
           "limit": {
             "context": 65536,

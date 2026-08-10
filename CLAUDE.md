@@ -12,7 +12,7 @@ A Bash tool (`ai.sh`) that launches a local [oMLX](https://github.com/jundot/oml
 bash ai.sh              # Qwen 3.6 35B-A3B 6-bit (local oMLX) + opencode
 bash ai.sh -l           # Qwen 3.6 35B-A3B oQ6 +MTP (speculative decode) + opencode
 bash ai.sh -g           # Gemma 4 12B QAT+OptiQ 4-bit (small, dense) + opencode
-bash ai.sh --muse       # Muse Glimmer 30B oQ4e (dense, newer oMLX) + opencode
+bash ai.sh --macaw      # Macaw 4-bit LFM2.5-2.6B (small, fast) + opencode
 bash ai.sh --no-hybrid  # Disable the default @advisor cloud-Claude subagent
 bash ai.sh -k           # Kill the local server
 bash ai.sh -h           # Show help
@@ -71,89 +71,40 @@ Context is nonetheless capped at **65,536** in `opencode.json`, matching the def
 
 **Measured baseline** (first run, this box, short prompts, MCP-free measurement path): **9.10 GB resident** with the model loaded, **~44 tok/s** decode, steady across three 400–500-token turns (43.66 / 43.91 / 44.18); cold model load ~2.0–2.3 s, and no measurable load cost on subsequent turns. Resident sits a little under the ~11 GB estimate because these prompts carry almost no KV; add ~0.9 GB for a full 65 k window.
 
-### `--muse` — Muse Glimmer 30B oQ4e (dense, runs a second oMLX build)
+### `--macaw` — Macaw 4-bit (LFM2.5-2.6B, small and fast)
 
-`ai --muse` runs **`Jundot/Muse-Glimmer-30B-oQ4e`** — Meta's Muse Glimmer 30B in oMLX's native **oQ** quant, built by the oMLX author with oMLX 0.5.8.dev1. **20.28 GB on disk**, 5 shards. Auto-downloaded on first use.
+`ai --macaw` runs **`badtheorylabs/Macaw-4bit-MLX`** — a 4-bit MLX build of badtheorylabs' Macaw, itself a fine-tune of LiquidAI's **LFM2.5-2.6B**. **1.54 GB on disk, ~2 GB resident**: an order of magnitude below every other profile. Auto-downloaded on first use. Opt-in, mutually exclusive with `-l` and `-g`, and it changes no default.
 
-**Read "mixed precision" narrowly here.** The quant is a 4-bit affine floor at group size 64 with just **17 per-layer overrides** — 13 at 5-bit, 3 at 6-bit, 1 at 8-bit — placed on `embed_tokens` and on early-layer `mlp.down_proj` / `self_attn.o_proj` by an importance matrix calibrated on `oqe_code_multilingual` (128 samples × 512 tokens; the report ships as `oq_imatrix_report.json`). For scale, `-g`'s Gemma OptiQ build carries **329** overrides. Against ~2272 tensors, 17 lifts make this much closer to a flat 4-bit than the phrase "mixed precision" implies — so if it underperforms, do not assume the calibration was the deciding factor.
+**It runs on the pinned oMLX — no second build.** `mlx-lm 0.31.3` already ships an `lfm2` model module, so `~/.omlx/venv` serves it directly. This is the whole reason the profile is cheap to carry: one venv, one source checkout, one KV-cache directory at the usual 40 GB.
 
-**This profile is unproven. It exists to measure.** No benchmark data here supports "Muse Glimmer beats Qwen 3.6 35B-A3B" for coding. It is opt-in and changes no default. `--muse` is mutually exclusive with `-l` and `-g`.
+**Know what this model is.** Macaw is a **macOS desktop-assistant** fine-tune — its card advertises 97 macOS tools, email, PDFs and battery status — at roughly **2.6B parameters** against the Qwen default's 35B-A3B. It is here for **latency, not skill**. Do not expect it to reason about code like the 35B; expect it to be fast and to drive tools competently.
 
-**It runs a second oMLX build, and that is the whole reason the profile is structured the way it is.** Muse Glimmer support landed upstream in `6ee393d4` (VLM support), `39bb1784` (DFlash speculative decode) and `9a57d63d` (centered-RMSNorm FP32 operation order) — **2190 commits** after the pinned `9aa73b1` / `omlx 0.4.2rc1` the other profiles run. Upstream adds `omlx/adapter/muse_glimmer.py` (the ATEM channel parser) and a **vendored mlx-vlm patch** at `omlx/patches/mlx_vlm_muse_glimmer_compat/`; upstream mlx-vlm has no `muse_glimmer` module, so only the oMLX upgrade supplies it. The pins move too (`mlx` 0.31.2 → 0.32.0, `transformers` 5.10.2 → >=5.12.1), which makes it a venv rebuild rather than an upgrade.
+**Architecture.** 30 layers, but only **6 are `full_attention`** — the other 24 are short convolutions (`conv_L_cache: 3`). Hidden 2048, 32 heads, 8 KV heads, head_dim 64, vocab 128000. KV comes from those 6 attention layers alone at ~**12 KB/token** ⇒ ~0.8 GB at 65 k. Native `max_position_embeddings` is **128000**; `opencode.json` caps context at **65,536 / 8,192 output** to match the other profiles for a clean single-variable comparison, not because memory forces it. The same long-range-recall caveat as `-g` applies, and more sharply: most layers see only a short convolutional window.
 
-So the layout is **two checkouts and two venvs**, not one upgraded in place:
-
-| | Checkout | venv | KV cache | Budget |
-|---|---|---|---|---|
-| `ai` / `-l` / `-g` | `~/.omlx/src` @ `9aa73b1` | `~/.omlx/venv` | `~/.omlx/cache` | 15 GB |
-| `--muse` | `~/.omlx/src-next` @ `origin/main` | `~/.omlx/venv-next` | `~/.omlx/cache-next` | 25 GB |
-
-A second venv **alone would isolate nothing**: `~/.omlx/venv` is an *editable* install of `~/.omlx/src`, so pulling that checkout would make the old venv run the new code at once. The second checkout is what makes the other profiles a real rollback path. Costs ~1 GB.
-
-**The two builds must not share a cache directory** — but for the mundane reason, not the format one. Both are checked in `omlx/cache/paged_ssd_cache.py`:
-
-- **Format is mostly compatible, contrary to what you might assume.** Both builds define `_CACHE_FORMAT_VERSION = "3"`. The pinned build reads `{"2","3"}`; the new one reads `{"2","3","4","5"}` and writes `"3"` by default. It writes `"5"` only when `gdn_ssd_split_enabled` (an env-gated setting that defaults to `False` in `omlx/config.py` and which `ai.sh` never sets), and `"4"` only for a `PoolingCache` append-only delta. So a block the pinned build rejects is the exception, not the rule — and a rejected block is just a cache miss, which is the safe failure anyway.
-- **The real reason is mutual eviction.** Both servers run `_prune_cache` oldest-first down to *their own* budget at every start. Point them at one directory and each start deletes the other's warm blocks, which destroys the prefix-cache win that collapses agentic time-to-first-token from ~30s to ~1s. This one is unconditional.
-
-Hence `cache-next`. The two budgets sum to the 40 GB the single cache used before the split, so total disk use is unchanged; the first run after this change prunes the existing 22 GB cache down to 15 GB.
-
-`~/.omlx/model_settings.json` **is** shared safely: `SETTINGS_VERSION = 1` on both builds and `from_dict` drops unknown fields. `bge-m3` also survives the upgrade (still an `XLMRobertaModel` in upstream `EMBEDDING_ARCHITECTURES`) — which matters, because it serves smart-coding RAG *and* `opencode-mem`, so an embedding regression would break memory and RAG, not just chat. Every server flag `ai.sh` passes still exists upstream.
-
-**Architecture caveats — read these before reading any measurement:**
-
-- **Dense 30B, not a MoE.** Every decoded token reads all the weights, against ~3B active parameters for Qwen 35B-A3B. Expect a large decode slowdown. This is the same trap as `-g`: smaller on disk does not mean faster.
-- **Long-range recall is structurally weak.** Only **13 of 52** layers are `full_attention`; the other 39 are `sliding_attention` with `sliding_window: 2048`. Gemma's equivalent caveat is 8 of 48 at window 1024. Recall of detail far back in a long session is weaker than the layer count suggests.
-- **Vision weights are dead weight.** The quant carries a ~1.85B vision tower (~0.9 GB at 4-bit; 806 `vision_tower.*` tensors against 1463 `language_model.*`). oMLX registers `muse_glimmer` in `VLM_ARCHITECTURES` and always uses the VLM engine — no runtime flag skips the tower. Accepted rather than hand-stripping tensors, since a ready-made quant is the lower-risk path.
-- Text stack: 52 layers, hidden 6656, 32 heads, **2 KV heads**, head_dim 128, vocab 202048, `max_position_embeddings` 131072.
-
-**KV is cheap:** ~13 KB/token plus ~82 MB fixed ⇒ ~0.85 GB at 65 k. Context is capped at **65,536 / 8,192 output** with `"temperature": false`, matching the Qwen default exactly so `ai` vs `--muse` stays a single-variable comparison. `OMLX_HOT_CACHE` stays at 8 GB and `OMLX_MAX_CONCURRENT` at 2 during the measurement.
-
-**The primary risk is tool-call parsing, not speed.** The chat format is Onyx/ATEM (`<|start|>role<|message|>BODY<|eom|>`), and tool calls are **XML**, not JSON (`<atem:function_calls><atem:invoke name="…">`) — the model's own prompt states the payload "is not expected to be valid XML and is parsed with regular expressions". `omlx/adapter/muse_glimmer.py` is days old. Reasoning goes to a `to=self` channel that oMLX surfaces as `reasoning_content`, and the chat template defaults `reasoning_strength` to `high` when the caller passes nothing — which opencode does. oMLX has no `reasoning_strength` field; its knobs are `enable_thinking`, `thinking_budget_enabled`, `thinking_budget_tokens` and `reasoning_parser`.
-
-**Phase-1 smoke test (not the measurement).** The new build serves the model and the two-level id resolves: a request for `Jundot/Muse-Glimmer-30B-oQ4e` is matched to the `Muse-Glimmer-30B-oQ4e` directory leaf that `/v1/models` actually lists, and the response echoes the two-level id back. Cold model load **5.34 s**. Decode **~21.5–21.9 tok/s** on trivial prompts — above the ≥15 tok/s gate, but on ~60-token prompts with no KV, so it is not a substitute for a real agentic turn. Cache isolation holds: a `--muse` server writes only to `cache-next` and left the 22 GB `cache` untouched. Resident memory was **not** measured — MLX allocates through Metal unified memory, so `ps` RSS reported 2.77 GB against a 20.3 GB model and is meaningless here.
-
-**Measured on real agentic turns — prefill is the cost, not decode.** From `logs/omlx-server-*.log` on a live opencode session at a 12.8k-token context:
+**Tool calls use LFM2 syntax, and oMLX parses it natively.** The template emits
 
 ```
-277 tokens in 89.61s (18.7 tok/s), prompt: 12811     → ~75s prefill ≈ 171 tok/s
-187 tokens in 75.77s (16.1 tok/s), prompt: 12808     → ~64s prefill ≈ 200 tok/s
+<|tool_call_start|>[read_file(path='src/main.py')]<|tool_call_end|>
 ```
 
-oMLX's reported tok/s is the **decode** rate, so subtract decode time to see prefill. Decode passes the ≥15 tok/s gate comfortably (15–22 tok/s throughout). But a single 12.8k-token turn costs **~64–75 s of prefill**, which is what makes the profile feel unusable — one user-visible turn took 1m 16s. This is the dense-30B caveat in numbers: every prefilled token reads all ~20 GB of weights, against ~3B active for Qwen 35B-A3B. **Treat prefill, not decode, as the gate for this profile.**
+not OpenAI JSON. `omlx/api/tool_calling.py` handles exactly this marker format, which is what makes the model usable from opencode at all. **Verified end to end** on the pinned build: a request with two tool definitions returned `finish_reason: tool_calls` with `read_file` and `{"path": "src/main.py"}` correctly parsed.
 
-**The prefix cache does not rescue it, because the prompt is not stable:**
-```
-prefix cache: re-prefills 10760 of 12808 tokens (reused 2048); closest stored
-sequence shares the first 3288 of 12288 comparable tokens before diverging
-```
-One 2048-token block reused out of 12808. Something rewrites the prompt head between turns, so 84% is recomputed at full price every turn. On this profile that is expensive in a way it is not on the MoE.
+`generation_config.json` asks for greedy decoding (`do_sample: false`, `repetition_penalty: 1.1`) and names no temperature. `opencode.json` sets `"temperature": false`, so opencode omits the option and oMLX falls back to exactly that recipe — the same pattern the other profiles use.
 
-**`--muse` therefore runs with `opencode-mem` disabled** (`ai.sh` appends the session directory to `OPENCODE_MEM_EXCLUDE_DIRS`, reusing the tested opt-out rather than adding a second mechanism). Two measured reasons, both specific to a dense 30B — the plugin stays on for every other profile:
+**Measured on this box** (pinned oMLX, cold cache, MCP-free path):
 
-1. **Summarizer contention.** `OPENCODE_MEM_MODEL` points auto-capture at the *session* model, so on this profile the summarizer is the dense 30B. Two capture runs of 1364 and 1284 tokens took **146.8 s and 129.2 s**, holding one of the two concurrent slots for minutes. The interactive turn decoding against them fell to **10.2 tok/s** from ~20 solo.
-2. **Prefix churn.** Recall injection rewrites the head of the prompt — precisely what the prefix cache cannot absorb at ~200 tok/s prefill.
+| Prompt | Prefill | Rate |
+|---|---|---|
+| 10,095 tokens | 4.44 s | ~2,270 tok/s |
+| 25,215 tokens | 13.61 s | ~1,850 tok/s |
+| short prompt | — | **59.5 tok/s decode** |
 
-**One trap worth knowing before you debug this profile.** At `max_tokens: 64` the model returns `content: None`, a full `reasoning_content`, and `finish_reason: length` — which looks exactly like the Gemma 4 failure recorded above. **It is not the same bug.** Raise the budget and it terminates normally: at 600 and 2000 tokens it returned `finish_reason: stop` with `content: "OK"` after ~340–400 characters of reasoning. Muse Glimmer simply reasons before answering, so any budget smaller than its reasoning prefix truncates mid-thought. Do not reach for `enable_thinking: false` on this evidence.
+Prefill was measured directly with `max_tokens: 1`, not inferred. **Do not infer prefill by subtracting decode from the log line** — the pinned 0.4.2rc1 and the newer 0.5.8.dev3 report their `tok/s` differently (end-to-end vs decode-only), so the arithmetic silently disagrees between builds. One token of output isolates prefill on either.
 
-**Reasoning is capped to `medium` via `model_settings.json` — measured, not guessed.** The template line is `reasoning_strength if reasoning_strength is defined and reasoning_strength else 'high'`, and opencode passes nothing, so the shipped default is **high**. Measured on "What are you?" against the live server:
+**Why this profile exists: prefill.** The `--muse` experiment it replaced was removed for being unusable, and the cause was measured precisely — a dense 30B prefilled at ~200 tok/s, so a single 12.8k-token agentic turn cost ~64 s before a token appeared, and one real turn took 1m 16s. Macaw prefills the same context in roughly **5–6 s**, about **11× faster**, and decodes ~3× faster. That gap, not benchmark quality, is what this profile buys.
 
-| `reasoning_strength` | Wall time | Output tokens | Reasoning share |
-|---|---|---|---|
-| `high` (default) | 9.61 s | 214 | ~85% |
-| `medium` (**pinned**) | 4.29 s | 84 | ~69% |
-| `low` | 3.74 s | 73 | ~40% |
+**No `model_settings.json` entry is written for it**, and none is expected: its template has no reasoning-strength default to fight, unlike the model it replaced.
 
-Decode itself is healthy at **~20–22 tok/s**; the latency is token *volume*, not speed. `high` spent 13.7 s "thinking" before a one-line answer in a real session. `medium` is pinned as the hedge — it keeps deliberation that may earn its keep on coding turns while removing most of the stall.
-
-**The knob is not `enable_thinking`.** Unlike `-g`, this model routes reasoning through a channel oMLX parses on purpose, so switching thinking off is a different and wrong fix. oMLX has no `reasoning_strength` field either; the value reaches the template through `ModelSettings.chat_template_kwargs`, which `merge_chat_template_request_kwargs()` folds in at *lowest* precedence — a per-request kwarg would still win, which is why opencode sending nothing is what makes the pin effective. `scripts/patch-omlx-mtp.mjs` writes it under both the two-level id and the directory leaf, as every entry must be.
-
-**Settings are read at model load, and a same-model relaunch does not restart the server.** `ai --muse` twice in a row hits the "Server already running" branch, so a changed setting is silently not picked up. Run `ai -k` first.
-
-**Gates before this profile could become the default:** ≥15 tok/s decode; tool calls parse across one full agentic turn with the smart-coding MCP on; no memory-guard eviction on a 30k-token prefill. Measured against Qwen on the same prompts, in the same session, with `opencode-mem` auto-capture off and then on.
-
-**Deliberately not wired up:** the **DFlash drafter** (oMLX supports it for this model — `omlx/engine/dflash.py`; routing keys on `config_model_type == "muse_glimmer_assistant"`, *not* the historic "`-assistant` means MTP" name rule; `meta-models/Muse-Glimmer-30B-assistant` is 5.11 GB bf16 with no MLX quant, but oMLX quantizes the drafter itself via `dflash_draft_quant_weight_bits`). Before enabling it, disable `dflash_ssd_cache` or exclude its path from `_prune_cache` — **DFlash's L2 cache writes into the same SSD cache directory `_prune_cache` deletes from blindly.** Also deferred: a local **oQ text-only** build (oMLX's oQ pipeline takes a `text_only` parameter in `omlx/admin/oq_manager.py` and applies the Muse compat patch in `omlx/oq.py`), which would drop the dead vision tower but needs the 59.58 GB source and a disk cleanup first.
-
-**On the choice of weights.** `mlx-community/Muse-Glimmer-30B-4bit` (21.38 GB, flat) is the only other real MLX build; the `-5bit`, `-6bit`, `-8bit`, `-bf16`, `-mxfp4`, `-mxfp8` and `-nvfp4` repos under `mlx-community` are **empty placeholders** holding just `.gitattributes` and `README.md`. A real 6-bit exists at `georgeis55/Muse-Glimmer-30B-MLX-6bit` (26.42 GB) but was rejected on unknown provenance for a brand-new architecture. oQ4e won over the flat 4-bit on three points: it is built by the server author with the exact oMLX version this profile runs, its imatrix is calibrated on code, and it is 1.1 GB smaller. Two costs come with that choice. First, **attribution ambiguity** — a disappointing result cannot cleanly separate the model, the quant and the days-old adapter. Second, the quant had **0 downloads and was hours old** when it was picked, so no one else had run it. If the profile misbehaves, `mlx-community/Muse-Glimmer-30B-4bit` is the control: same architecture, flat quant, the path other users take.
 
 ### Hybrid cloud advisor mode (default on; `--no-hybrid` to disable)
 
@@ -198,7 +149,7 @@ prettier here).
 ### `ai.sh` — Single Bash function `ai()`
 
 1. **Server lifecycle**:
-   - `_resolve_runtime` — picks the oMLX **binary**, KV-cache **directory** and cache **budget** for the selected profile, after the profile dispatch. `OMLX_BIN` / `OMLX_CACHE_DIR` / `OMLX_SSD_CACHE_MAX` still override, but they apply to every profile at once. The profile's own venv is preferred over an `omlx` on PATH, because a PATH build is whatever was installed last and the pinned build cannot serve Muse Glimmer at all.
+   - `_resolve_runtime` — picks the oMLX **binary**, KV-cache **directory** and cache **budget** for the selected profile, after the profile dispatch. `OMLX_BIN` / `OMLX_CACHE_DIR` / `OMLX_SSD_CACHE_MAX` still override, but they apply to every profile at once. Every profile resolves to the same venv today; the mechanism stays because it costs nothing and a PATH build is whatever was installed last.
    - `_start_server` — runs `omlx serve --model-dir … --paged-ssd-cache-dir …` with tuned cache/memory flags, using the binary `_resolve_runtime` picked. oMLX discovers models from `--model-dir` subdirectories, so no `--model` is passed; opencode picks the model per request.
    - `_wait_for_server` — polls `/v1/models` with spinner, opens tmux log pane if in tmux
    - `_kill_server` — kills by PID file then port scan (only targets python/mlx/omlx processes — the oMLX process renames itself to `omlx-server`)
@@ -206,7 +157,7 @@ prettier here).
 2. **RAG**: Checks for `smart-coding-mcp` on launch (auto-indexes via opencode MCP config). The default keeps RAG (index built once, then cheap); **`-l` disables all MCPs** (RAG included) via `OPENCODE_CONFIG_CONTENT` — see the `-l` section.
 3. **Frontend launch**: After the server is healthy, runs `opencode -m "mlx/<model-id>"` (configured via `opencode.json`) in the caller's original `$PWD`.
 4. **Hybrid advisor** (on by default; off under `--no-hybrid`): symlinks `agents/advisor.md` → `~/.config/opencode/agents/advisor.md` and `plugins/advisor-egress-log.js` → `~/.config/opencode/plugins/`, runs an Anthropic-OAuth preflight warning, and exports `ADVISOR_EGRESS_LOG`. Every non-advisor launch *removes* both symlinks (the airgap guarantee). See the Hybrid cloud advisor mode section above.
-5. **Model pinning**: launches `opencode -m mlx/<model-id>`, which **overrides** `opencode.json`'s default `model` (a Vercel AI Gateway model — see below). So `ai` / `-l` / `-g` / `--muse` always run their local oMLX model regardless of what a bare `opencode` defaults to.
+5. **Model pinning**: launches `opencode -m mlx/<model-id>`, which **overrides** `opencode.json`'s default `model` (a Vercel AI Gateway model — see below). So `ai` / `-l` / `-g` / `--macaw` always run their local oMLX model regardless of what a bare `opencode` defaults to.
 
 ### `opencode.json` — OpenCode provider config
 
@@ -257,13 +208,13 @@ Environment variables can be set in `ai.env` or exported before running.
 | `AI_LOG_DIR` | `$AI_DIR/logs` | Server log directory |
 | `AI_STATE_DIR` | `~/.local/state` | State and PID files |
 | `AI_PORT` | `10081` | oMLX server port |
-| `OMLX_BIN` | the profile's venv (else `omlx` on PATH) | oMLX server binary. `ai`/`-l`/`-g` → `~/.omlx/venv/bin/omlx`; `--muse` → `~/.omlx/venv-next/bin/omlx`. Setting this forces one binary on **every** profile, which breaks `--muse` or breaks the other three |
+| `OMLX_BIN` | the profile's venv, `~/.omlx/venv/bin/omlx` (else `omlx` on PATH) | oMLX server binary. Setting it forces one binary on **every** profile |
 | `OMLX_MODEL_DIR` | `~/.omlx/models` | Dir oMLX discovers models from (subdirectories) |
 | `OMLX_BASE_DIR` | `~/.omlx` | oMLX base path; `$OMLX_BASE_DIR/model_settings.json` is where `patch-omlx-mtp.mjs` writes MTP (`-l`) and thinking-off (`-g`) settings |
-| `OMLX_CACHE_DIR` | per profile | Paged SSD KV-cache directory. `ai`/`-l`/`-g` → `~/.omlx/cache`; `--muse` → `~/.omlx/cache-next`. The two oMLX builds disagree on the cache format and both prune oldest-first, so sharing one directory makes them evict each other — setting this collapses the split |
+| `OMLX_CACHE_DIR` | `~/.omlx/cache` | Paged SSD KV-cache directory |
 | `OMLX_HOT_CACHE` | `8GB` | In-RAM hot KV-cache tier size (model + tier must fit under the memory guard's soft threshold) |
-| `OMLX_SSD_CACHE_MAX` | per profile: `15GB` (`ai`/`-l`/`-g`), `25GB` (`--muse`) | Disk cap for the paged SSD cache (unset, oMLX claims nearly all free disk). The two budgets sum to the 40 GB the single shared cache used before the split |
-| `OMLX_CACHE_PRUNE_GB` | numeric part of the cap in force (`15` or `25`) | Prune the on-disk KV cache to this many GB at each server (re)start, oldest-first (mtime = LRU). Derived from the same number the server is given, so the two can never disagree. oMLX's own eviction only tracks its *live* index, so blocks orphaned by prior runs / model-quant switches leak far over the cap (observed 122 GB vs a 40 GB cap); this enforces it. Runs only in `_start_server` (server down), so no live process holds the blocks. Set `0` to disable |
+| `OMLX_SSD_CACHE_MAX` | `40GB` | Disk cap for the paged SSD cache (unset, oMLX claims nearly all free disk) |
+| `OMLX_CACHE_PRUNE_GB` | numeric part of `OMLX_SSD_CACHE_MAX` (e.g. `40`) | Prune the on-disk KV cache to this many GB at each server (re)start, oldest-first (mtime = LRU). Derived from the same number the server is given, so the two can never disagree. oMLX's own eviction only tracks its *live* index, so blocks orphaned by prior runs / model-quant switches leak far over the cap (observed 122 GB vs a 40 GB cap); this enforces it. Runs only in `_start_server` (server down), so no live process holds the blocks. Set `0` to disable |
 | `OMLX_MEMORY_GUARD_GB` | `48` | Memory ceiling oMLX won't exceed (headroom on 64 GB) |
 | `OMLX_MAX_CONCURRENT` | `2` | Max concurrent requests (continuous batching): 1 coding turn + 1 opencode-mem summarizer. Don't set to 1 — memory captures would serialize with coding turns |
 | `OPENCODE_MEM_MAX_CONTEXT_CHARS` | `24000` | Char budget the opencode-mem summarizer input is capped to (≈6k tokens). Read by the patched plugin (see Memory section); prevents unbounded summarizer prefills from saturating the memory guard |
@@ -285,21 +236,14 @@ The real `ai.env` is gitignored. `ai.env.example` holds commented placeholders f
   uv venv ~/.omlx/venv --python 3.12
   VIRTUAL_ENV=~/.omlx/venv uv pip install -e ~/.omlx/src
   ```
-  **Two builds are installed side by side** (see the `--muse` section). The pair above is pinned at `9aa73b1` / `omlx 0.4.2rc1` (mlx 0.31.2, transformers 5.10.2) and serves `ai` / `-l` / `-g`. The `--muse` profile needs a second pair, because a second venv alone would not isolate anything — `~/.omlx/venv` is an *editable* install of `~/.omlx/src`, so pulling that checkout would change the pinned build too:
-  ```bash
-  git clone https://github.com/jundot/omlx ~/.omlx/src-next   # origin/main
-  uv venv ~/.omlx/venv-next --python 3.12
-  VIRTUAL_ENV=~/.omlx/venv-next uv pip install -e ~/.omlx/src-next
-  ```
-  That yields `omlx 0.5.8.dev3` (mlx 0.32.0, transformers 5.12.1). **Never `git pull` `~/.omlx/src`** — it would silently upgrade the working profiles and destroy the rollback path. To refresh the Muse build, pull `~/.omlx/src-next` and re-run its `uv pip install -e`.
-- `uv` — used to build/run the oMLX venvs
+- `uv` — used to build/run the oMLX venv
 - `opencode` — frontend, sst/opencode (`brew install sst/tap/opencode`)
 - `node` — required by the `opencode-mem` memory plugin (auto-installed by opencode from the `"plugin"` array). On launch `ai.sh` also re-applies `scripts/patch-opencode-mem-cap.mjs` to cap the plugin's summarizer input (idempotent; see the Memory section)
 - `smart-coding-mcp` — for RAG, installed as a **private repo-owned copy** so we can patch it without mutating a shared global: `npm install --prefix ~/.smart-coding-omlx smart-coding-mcp`. `opencode.json` launches it from there. Its in-process Xenova embedder is rerouted to oMLX (`bge-m3`) by `scripts/patch-smart-coding-omlx.mjs`, which `ai.sh` re-applies on every launch (idempotent; survives `npm update` of the copy).
   - **RAG excludes — `scripts/patch-smart-coding-excludes.mjs`** (also re-applied every launch). smart-coding-mcp derives its final exclude list from `ProjectDetector` *alone*: `lib/config.js` sets `excludePatterns = [...getSmartIgnorePatterns(), ...userConfig]`, discarding its own 200-entry `DEFAULT_CONFIG.excludePatterns`, and in `--workspace` mode the **package's `config.json` is never read** (it loads `config.json` from the *workspace* root) — so editing the package config fixes nothing. The detector only emits a language's ignore patterns when it *detects* that language, yet `py` is unconditionally in `fileExtensions`. Net effect: a JavaScript repo containing a stray Python virtualenv gets 501 JS-only patterns, none matching `venv`/`site-packages`, and indexes the entire virtualenv as first-party source. Measured on one client repo: **4,348 of 5,115 discovered files and 133,011 of 140,703 chunks (94.5%) came from `.venv`**, producing a 750 MB `embeddings.db` and pinning oMLX above 100% CPU for hours — with **no LLM loaded**, since the embedder issues one HTTP request per chunk (~12/s). The patch adds the `SMART_CODING_EXCLUDE_PATTERNS` / `SMART_CODING_EXCLUDE_DEFAULTS` overrides upstream lacks, applied at the end of `loadConfig()` so they win over both sources; the built-in virtualenv set needs no configuration.
   - **Patterns are not glob-matched.** `features/index-codebase.js#discoverFiles` reduces each pattern to a bare directory name via `pattern.match(/\*\*\/([^/*]+)\/?\*?\*?$/)` and feeds the set to `fdir().exclude(d => set.has(d))` — an exact basename match at any depth. A pattern therefore only works as literally `**/<name>/**` with no wildcard inside `<name>`; `**/*.egg-info/**` extracts nothing and is silently inert (which is why it is deliberately absent from the built-in list), and file-level globs like `**/*.min.js` can never work.
   - **Changing excludes does not shrink an existing index.** Already-stored chunks persist in `.smart-coding-cache/embeddings.db`; delete that directory (with opencode closed, so nothing holds the SQLite WAL) to reclaim the space and re-index clean.
-- **Models** live under `~/.omlx/models/` as MLX-format subdirectories. The weights are exposed by symlinking the HF cache snapshot to `~/.omlx/models/<namespace>/<name>` (so the served two-level id matches `opencode.json` — e.g. `mlx-community/Qwen3.6-35B-A3B-6bit`); `bge-m3` (embeddings) is `mlx-community/bge-m3-mlx-fp16` downloaded into `~/.omlx/models/bge-m3`. **Auto-download**: on launch `ai.sh`'s `_ensure_model` checks the selected model is present (a `*.safetensors` under its dir) and, if not, runs `hf download <id>` (using the oMLX venv's `hf`/`huggingface-cli`) then symlinks the resulting snapshot into place — so `ai` (6-bit default, ~27.5 GB), `ai -l` (oQ6-mtp, ~30 GB), `ai -g` (Gemma 4 12B QAT+OptiQ, 9 GB) and `ai --muse` (Muse Glimmer oQ4e, 20.3 GB) fetch their weights on first use instead of failing lazily. Idempotent once the weights exist. The `hf` binary is taken from the *selected profile's* venv, so `--muse` downloads with the newer build's client.
+- **Models** live under `~/.omlx/models/` as MLX-format subdirectories. The weights are exposed by symlinking the HF cache snapshot to `~/.omlx/models/<namespace>/<name>` (so the served two-level id matches `opencode.json` — e.g. `mlx-community/Qwen3.6-35B-A3B-6bit`); `bge-m3` (embeddings) is `mlx-community/bge-m3-mlx-fp16` downloaded into `~/.omlx/models/bge-m3`. **Auto-download**: on launch `ai.sh`'s `_ensure_model` checks the selected model is present (a `*.safetensors` under its dir) and, if not, runs `hf download <id>` (using the oMLX venv's `hf`/`huggingface-cli`) then symlinks the resulting snapshot into place — so `ai` (6-bit default, ~27.5 GB), `ai -l` (oQ6-mtp, ~30 GB), `ai -g` (Gemma 4 12B QAT+OptiQ, 9 GB) and `ai --macaw` (Macaw 4-bit, 1.5 GB) fetch their weights on first use instead of failing lazily. Idempotent once the weights exist. The `hf` binary is taken from the selected profile's venv.
 - **Per-model oMLX settings** live in `~/.omlx/model_settings.json` (oMLX's own store, base path `~/.omlx`), **not** in this repo. On launch `ai.sh` runs `scripts/patch-omlx-mtp.mjs` to merge in `mtp_enabled: true` for the oQ6-mtp (`-l`) build and `enable_thinking: false` for Gemma 4 (`-g`) — settings oMLX reads at **model load**, so a change needs a server restart (`ai -k`; the model-switch restart covers the usual case). Each entry is written under **both** the two-level model id and its bare directory-leaf name, because oMLX resolves requests to the leaf and keys settings by that (see the `-g` section — the two-level-only key was silently never consulted). The patch is idempotent and non-destructive: it only writes when a value differs and preserves every other model/key (e.g. anything set via the oMLX admin panel). Schema is `{"version":1,"models":{<id>:{…}}}`; oMLX's `ModelSettings.from_dict` filters to known fields and defaults the rest, so the partial entries the script writes are valid. Override the file path with `OMLX_BASE_DIR` (default `~/.omlx`).
 
 ## Server Tuning
@@ -307,7 +251,7 @@ The real `ai.env` is gitignored. `ai.env.example` holds commented placeholders f
 oMLX launches with explicit flags (see the `OMLX_*` Configuration vars):
 
 - `--paged-ssd-cache-dir ~/.omlx/cache` — **the headline feature.** Block-based KV cache (vLLM-style, prefix sharing + copy-on-write) with a cold SSD tier; recurring prefixes (system prompt, shared codebase context) are restored from disk on a cache hit — even across a server restart — instead of recomputed. Measured locally: cold prefill ~2.3s → warm ~0.6s on a shared prefix.
-- `--paged-ssd-cache-max-size` — disk cap for the SSD tier; oMLX evicts LRU within it. **Split per profile since the `--muse` work: 15 GB for `ai`/`-l`/`-g` in `~/.omlx/cache`, 25 GB for `--muse` in `~/.omlx/cache-next`** — the two oMLX builds disagree on the cache format and both prune oldest-first, so one shared directory would make them evict each other. The budgets sum to the 40 GB the single cache used before. Without it oMLX sizes the cache off free disk space and will grow until the disk is nearly full. **Caveat: this cap only governs oMLX's *live* index.** Blocks orphaned by a prior run or a model/quant switch (each quant writes its own KV blocks) fall out of the index and oMLX's LRU never revisits them, so the on-disk footprint drifts far past the cap — observed at **122 GB against a 40 GB cap** (~19 days of accumulation), filling the disk to 99%. `ai.sh` compensates: `_prune_cache` (in `_start_server`) deletes cache blocks oldest-first (mtime = LRU, matching oMLX's intent) down to `OMLX_CACHE_PRUNE_GB` on every server (re)start. It runs only with the server down, so nothing holds the blocks live; blocks are content-addressed, so a later lookup for a pruned one is just a cache miss → recompute (the safe failure mode).
+- `--paged-ssd-cache-max-size 40GB` — disk cap for the SSD tier; oMLX evicts LRU within it. Without it oMLX sizes the cache off free disk space and will grow until the disk is nearly full. **Caveat: this cap only governs oMLX's *live* index.** Blocks orphaned by a prior run or a model/quant switch (each quant writes its own KV blocks) fall out of the index and oMLX's LRU never revisits them, so the on-disk footprint drifts far past the cap — observed at **122 GB against a 40 GB cap** (~19 days of accumulation), filling the disk to 99%. `ai.sh` compensates: `_prune_cache` (in `_start_server`) deletes cache blocks oldest-first (mtime = LRU, matching oMLX's intent) down to `OMLX_CACHE_PRUNE_GB` on every server (re)start. It runs only with the server down, so nothing holds the blocks live; blocks are content-addressed, so a later lookup for a pruned one is just a cache miss → recompute (the safe failure mode).
 - `--hot-cache-max-size 8GB` — in-RAM hot KV tier (oMLX default is 0/disabled; must be set explicitly). Bigger tier = more in-memory hits before spilling to SSD — but model (~27.5 GB for the 6-bit default, ~30 GB for oQ6-mtp under `-l`) + tier must stay under the memory guard's **soft threshold (85% of the guard = 40.8 GB at 48)**; at 12 GB the steady state sat above it and the enforcer evicted models mid-request (aborted completions = the agent "choking").
 - `--memory-guard-gb 48` — hard ceiling oMLX won't exceed, leaving ~16 GB for macOS/apps on a 64 GB machine. Replaces the old `MLX_CACHE_LIMIT`. Raise on 128 GB configs. Eviction starts at the 85% soft threshold, not the ceiling.
 - `--max-concurrent-requests 2` — continuous batching. One slot for the interactive coding turn, one so the opencode-mem summarizer can overlap it instead of serializing. Kept at 2 (not higher) because each concurrent prefill adds transient working memory against the guard's soft threshold; embeddings run on the separate bge-m3 engine and don't compete for these slots.
