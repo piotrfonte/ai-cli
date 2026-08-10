@@ -114,7 +114,19 @@ Hence `cache-next`. The two budgets sum to the 40 GB the single cache used befor
 
 **One trap worth knowing before you debug this profile.** At `max_tokens: 64` the model returns `content: None`, a full `reasoning_content`, and `finish_reason: length` — which looks exactly like the Gemma 4 failure recorded above. **It is not the same bug.** Raise the budget and it terminates normally: at 600 and 2000 tokens it returned `finish_reason: stop` with `content: "OK"` after ~340–400 characters of reasoning. Muse Glimmer simply reasons before answering, so any budget smaller than its reasoning prefix truncates mid-thought. Do not reach for `enable_thinking: false` on this evidence.
 
-**No `model_settings.json` entry is written for this model, deliberately.** Unlike `-g`, do **not** pin `enable_thinking: false` blindly — this model routes reasoning through a channel oMLX parses on purpose, so switching it off is not the same fix. Measure the unmodified reasoning-token fraction first, then set `thinking_budget_tokens` only if reasoning exceeds ~50% of output.
+**Reasoning is capped to `medium` via `model_settings.json` — measured, not guessed.** The template line is `reasoning_strength if reasoning_strength is defined and reasoning_strength else 'high'`, and opencode passes nothing, so the shipped default is **high**. Measured on "What are you?" against the live server:
+
+| `reasoning_strength` | Wall time | Output tokens | Reasoning share |
+|---|---|---|---|
+| `high` (default) | 9.61 s | 214 | ~85% |
+| `medium` (**pinned**) | 4.29 s | 84 | ~69% |
+| `low` | 3.74 s | 73 | ~40% |
+
+Decode itself is healthy at **~20–22 tok/s**; the latency is token *volume*, not speed. `high` spent 13.7 s "thinking" before a one-line answer in a real session. `medium` is pinned as the hedge — it keeps deliberation that may earn its keep on coding turns while removing most of the stall.
+
+**The knob is not `enable_thinking`.** Unlike `-g`, this model routes reasoning through a channel oMLX parses on purpose, so switching thinking off is a different and wrong fix. oMLX has no `reasoning_strength` field either; the value reaches the template through `ModelSettings.chat_template_kwargs`, which `merge_chat_template_request_kwargs()` folds in at *lowest* precedence — a per-request kwarg would still win, which is why opencode sending nothing is what makes the pin effective. `scripts/patch-omlx-mtp.mjs` writes it under both the two-level id and the directory leaf, as every entry must be.
+
+**Settings are read at model load, and a same-model relaunch does not restart the server.** `ai --muse` twice in a row hits the "Server already running" branch, so a changed setting is silently not picked up. Run `ai -k` first.
 
 **Gates before this profile could become the default:** ≥15 tok/s decode; tool calls parse across one full agentic turn with the smart-coding MCP on; no memory-guard eviction on a 30k-token prefill. Measured against Qwen on the same prompts, in the same session, with `opencode-mem` auto-capture off and then on.
 

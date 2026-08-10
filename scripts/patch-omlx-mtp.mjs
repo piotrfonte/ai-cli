@@ -3,13 +3,17 @@
 //
 // oMLX exposes some model behaviour only through per-model settings persisted in
 // ~/.omlx/model_settings.json (read by the server at model load), NOT through
-// `omlx serve` CLI flags. ai.sh needs one such setting on every launch:
+// `omlx serve` CLI flags. ai.sh enforces these on every launch:
 //
 //   • mtp_enabled=true for the oQ6-mtp build (ai -l) — multi-token prediction /
 //     speculative decode. It's OFF by default in oMLX even when the weights carry
 //     MTP heads (the `-mtp` build), so without this the build's MTP tensors are
 //     dead weight. (mtp_enabled is mutually exclusive with turboquant_kv / dflash,
 //     neither of which ai.sh enables, so there's no conflict.)
+//   • enable_thinking=false for Gemma 4 12B (ai -g) — see below.
+//   • chat_template_kwargs.reasoning_strength for Muse Glimmer (ai --muse) — see
+//     below. Note this one is an OBJECT value, which is why the idempotency
+//     check needs sameValue() rather than `!==`.
 //
 // File schema (see omlx/model_settings.py): {"version":1,"models":{<id>:{…}}}.
 // ModelSettings.from_dict() filters to known fields and defaults the rest, so a
@@ -47,6 +51,36 @@ const DESIRED = {
   // ms.enable_thinking takes precedence over chat_template_kwargs
   // (omlx/server.py), which makes this the one reliable place to pin it.
   "mlx-community/gemma-4-12B-it-qat-OptiQ-4bit": { enable_thinking: false },
+  // Muse Glimmer 30B (ai --muse) — cap how hard the model thinks before it
+  // answers. Its chat template reads
+  //   `reasoning_strength if reasoning_strength is defined and reasoning_strength else 'high'`
+  // so a caller that passes nothing gets HIGH — and opencode passes nothing.
+  // Measured on "What are you?" against the live server:
+  //   high (default)  9.61s  214 output tokens  ~85% of them reasoning
+  //   medium          4.29s   84 output tokens  ~69% reasoning
+  //   low             3.74s   73 output tokens  ~40% reasoning
+  // Decode itself is fine (~20-22 tok/s); the latency is token VOLUME. Note the
+  // knob is NOT enable_thinking: unlike Gemma, this model routes reasoning
+  // through a channel oMLX parses on purpose, and switching it off is a
+  // different (and wrong) fix. oMLX has no reasoning_strength field either — it
+  // reaches the template through settings.chat_template_kwargs, which
+  // merge_chat_template_kwargs() folds into the render kwargs.
+  "Jundot/Muse-Glimmer-30B-oQ4e": {
+    chat_template_kwargs: { reasoning_strength: "medium" },
+  },
+};
+
+// Deep value equality for the idempotency check. Scalars alone would let `!==`
+// do the work, but chat_template_kwargs is an OBJECT: `entry[k] !== v` compares
+// references, is always true, and would rewrite the file on every single launch.
+const sameValue = (a, b) => {
+  if (a === b) return true;
+  if (a === null || b === null) return false;
+  if (typeof a !== "object" || typeof b !== "object") return false;
+  const ak = Object.keys(a);
+  const bk = Object.keys(b);
+  if (ak.length !== bk.length) return false;
+  return ak.every((k) => Object.prototype.hasOwnProperty.call(b, k) && sameValue(a[k], b[k]));
 };
 
 const file = process.argv[2] || `${homedir()}/.omlx/model_settings.json`;
@@ -83,7 +117,7 @@ for (const [modelId, keys] of Object.entries(DESIRED)) {
   for (const alias of expandKeys(modelId)) {
     const entry = data.models[alias] || {};
     for (const [k, v] of Object.entries(keys)) {
-      if (entry[k] !== v) {
+      if (!sameValue(entry[k], v)) {
         entry[k] = v;
         changed = true;
       }

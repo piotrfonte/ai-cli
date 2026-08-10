@@ -680,7 +680,8 @@ ai() {
   _ensure_model || return 1
 
   # Enable per-model oMLX settings that aren't server CLI flags: MTP
-  # (multi-token prediction) for the oQ6-mtp (`-l`) build. These live in
+  # (multi-token prediction) for the oQ6-mtp (`-l`) build, thinking-off for
+  # Gemma (`-g`), and a reasoning_strength cap for Muse (`--muse`). These live in
   # ~/.omlx/model_settings.json, which oMLX reads at model
   # load — so a running server must be restarted to pick up a change (the
   # model-switch restart below handles the common case). Idempotent merge: it
