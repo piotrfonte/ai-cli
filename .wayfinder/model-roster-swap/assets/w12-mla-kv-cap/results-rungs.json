@@ -1,0 +1,22 @@
+[
+  {
+    "target": 32768,
+    "verdict": "OK",
+    "seconds": 116.0,
+    "prompt_tokens": 32783,
+    "peak_rss_gb": 26.06,
+    "finish_reason": "length",
+    "content": "The",
+    "detail": ""
+  },
+  {
+    "target": 24576,
+    "verdict": "OK",
+    "seconds": 75.17,
+    "prompt_tokens": 24592,
+    "peak_rss_gb": 27.91,
+    "finish_reason": "length",
+    "content": "The",
+    "detail": ""
+  }
+]

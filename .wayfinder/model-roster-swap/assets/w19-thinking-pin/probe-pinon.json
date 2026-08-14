@@ -1,0 +1,21 @@
+{
+  "label": "pinon",
+  "short": {
+    "wall_s": 6.41,
+    "finish_reason": "stop",
+    "reasoning_chars": 0,
+    "content_chars": 201,
+    "completion_tokens": 36,
+    "content_head": "A paged KV cache manages limited memory by splitting cached key-value states into fixed-size chunks, allowing efficient pre-allocation and swapping of key/value memory segments as context length grows.",
+    "reasoning_head": ""
+  },
+  "t2_real": {
+    "wall_s": 4.76,
+    "finish_reason": "stop",
+    "reasoning_chars": 0,
+    "content_chars": 1233,
+    "completion_tokens": 311,
+    "content_head": "```javascript\nimport { deepMerge } from 'deepmerge';\n\nexport function mergeModelSettings(existing, desired) {\n  let models = existing.models;\n  if (!models) {\n    models = {};\n    existing.models = models;\n  }\n  if (exis",
+    "reasoning_head": ""
+  }
+}

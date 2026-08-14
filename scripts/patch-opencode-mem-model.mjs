@@ -3,11 +3,10 @@
 // by the OPENCODE_MEM_MODEL env var.
 //
 // opencode-mem's auto-capture summarizer is pinned (in opencode-mem.jsonc) to the
-// default 35B model. But ai.sh can launch a DIFFERENT primary model (e.g. -l
-// oQ6-mtp, ~30GB). When the summarizer then asks oMLX for the 35B while the session
-// runs the other model, oMLX can't hold two ~28-30GB models under the 48GB guard, so
-// it ping-pongs (evict/reload) and 507s the session mid-turn — observed live as a
-// 507 retry loop.
+// default model. But ai.sh can launch a DIFFERENT primary model (--bonsai, --muse).
+// When the summarizer then asks oMLX for the default while the session runs the
+// other model, oMLX can't hold both under the 48GB guard, so it ping-pongs
+// (evict/reload) and 507s the session mid-turn — observed live as a 507 retry loop.
 //
 // Fix: have the summarizer reuse the model the session is ALREADY running. ai.sh sets
 // OPENCODE_MEM_MODEL=<session model id> on launch; this patch makes config.js honor

@@ -1,0 +1,58 @@
+{
+  "coding_model": "mlx-community/Muse-Glimmer-30B-4bit",
+  "summarizer_model": "lmstudio-community/GLM-4.7-Flash-MLX-6bit",
+  "coding_chars": 48000,
+  "capture_chars": 24000,
+  "control": {
+    "role": "coding",
+    "model": "mlx-community/Muse-Glimmer-30B-4bit",
+    "wall_s": 120.3,
+    "ok": true,
+    "finish_reason": "length",
+    "prompt_tokens": 13165,
+    "completion_tokens": 2048,
+    "cached_tokens": 12288,
+    "model_load_duration": null,
+    "total_time": 120.27
+  },
+  "contended": {
+    "coding": {
+      "role": "coding",
+      "model": "mlx-community/Muse-Glimmer-30B-4bit",
+      "wall_s": 175.84,
+      "ok": true,
+      "finish_reason": "length",
+      "prompt_tokens": 13165,
+      "completion_tokens": 2048,
+      "cached_tokens": 12288,
+      "model_load_duration": 11.79,
+      "total_time": 164.02,
+      "started_at_s": 2.0
+    },
+    "capture": {
+      "model": "lmstudio-community/GLM-4.7-Flash-MLX-6bit",
+      "context_chars": 24086,
+      "request_chars": 27118,
+      "abort_budget_s": 1000000000.0,
+      "wall_s": 106.75,
+      "ok": true,
+      "finish_reason": "stop",
+      "prompt_tokens": 7454,
+      "completion_tokens": 515,
+      "cached_tokens": 7424,
+      "tool_calls": 0,
+      "reasoning_chars": 1981,
+      "content_chars": 453,
+      "answered": false,
+      "within_budget": true,
+      "gate0": false
+    },
+    "overlap_wall_s": 177.84
+  },
+  "gate1": {
+    "control_tok_s_endtoend": 17.02,
+    "contended_tok_s_endtoend": 11.65,
+    "retained_pct": 68.4,
+    "passes": false
+  }
+}

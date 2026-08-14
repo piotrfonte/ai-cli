@@ -1,0 +1,68 @@
+{
+  "coding_model": "mlx-community/Muse-Glimmer-30B-4bit",
+  "summarizer_model": "prism-ml/Ternary-Bonsai-27B-mlx-2bit",
+  "coding_chars": 48000,
+  "capture_chars": 6000,
+  "control": {
+    "role": "coding",
+    "model": "mlx-community/Muse-Glimmer-30B-4bit",
+    "wall_s": 123.77,
+    "ok": true,
+    "finish_reason": "length",
+    "prompt_tokens": 13165,
+    "completion_tokens": 2048,
+    "cached_tokens": 12288,
+    "model_load_duration": null,
+    "total_time": 123.75
+  },
+  "contended": {
+    "coding": {
+      "role": "coding",
+      "model": "mlx-community/Muse-Glimmer-30B-4bit",
+      "wall_s": 170.6,
+      "ok": true,
+      "finish_reason": "length",
+      "prompt_tokens": 13165,
+      "completion_tokens": 2048,
+      "cached_tokens": 12288,
+      "model_load_duration": null,
+      "total_time": 170.58,
+      "started_at_s": 2.0
+    },
+    "capture": {
+      "model": "prism-ml/Ternary-Bonsai-27B-mlx-2bit",
+      "context_chars": 6087,
+      "request_chars": 8311,
+      "abort_budget_s": 1000000000.0,
+      "wall_s": 65.77,
+      "ok": true,
+      "finish_reason": "tool_calls",
+      "prompt_tokens": 2592,
+      "completion_tokens": 546,
+      "cached_tokens": 2048,
+      "tool_calls": 1,
+      "reasoning_chars": 1094,
+      "content_chars": 516,
+      "tool_name": "save_memory",
+      "tool_args_parse": true,
+      "memory_type": "bug-fix",
+      "summary_chars": 516,
+      "tags": [
+        "auto-capture",
+        "timeout",
+        "summarizer",
+        "opencode"
+      ],
+      "answered": true,
+      "within_budget": true,
+      "gate0": true
+    },
+    "overlap_wall_s": 172.6
+  },
+  "gate1": {
+    "control_tok_s_endtoend": 16.55,
+    "contended_tok_s_endtoend": 12.0,
+    "retained_pct": 72.5,
+    "passes": false
+  }
+}

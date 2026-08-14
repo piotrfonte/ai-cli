@@ -1,0 +1,32 @@
+[lmstudio-community/GLM-4.7-Flash-MLX-6bit] determinism probe...
+[lmstudio-community/GLM-4.7-Flash-MLX-6bit] deterministic=False -> 3 repeat(s)
+  T1_tool_chain[0] -> pass@1 (1.57s)
+  T1_tool_chain[1] -> pass@1 (1.37s)
+  T1_tool_chain[2] -> pass@1 (3.15s)
+  T2_merge_module[0] -> fail (19.58s)
+  T2_merge_module[1] -> fail (9.97s)
+  T2_merge_module[2] -> fail (19.5s)
+  T3_bash_prune[0] -> fail (6.47s)
+  T3_bash_prune[1] -> fail (7.54s)
+  T3_bash_prune[2] -> fail (5.26s)
+  T4_extend_no_regress[0] -> fail (13.67s)
+  T4_extend_no_regress[1] -> pass@2 (9.98s)
+  T4_extend_no_regress[2] -> fail (12.35s)
+{
+  "model": "lmstudio-community/GLM-4.7-Flash-MLX-6bit",
+  "probe": {
+    "deterministic": false,
+    "sample_a": "It stores memory in a way that allows the model to focus computation on the most relevant information while efficiently skipping older or less important parts of the context, optimizing resource usage and response speed.",
+    "sample_b": "A paged KV cache dynamically manages a coding agent's key-value cache memory, expanding and contracting in fixed-size pages to efficiently accommodate varying context lengths while minimizing redundant storage."
+  },
+  "repeats": 3,
+  "counts": {
+    "pass@1": 3,
+    "fail": 8,
+    "pass@2": 1
+  },
+  "pass_at_1": 3,
+  "pass_at_2_or_better": 4,
+  "total_runs": 12,
+  "total_wall_s": 112.2
+}

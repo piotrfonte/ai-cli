@@ -4,6 +4,35 @@
   "autoupdate": "notify",
   "plugin": ["opencode-mem"],
   "provider": {
+    "lmstudio": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "LM Studio",
+      "options": {
+        "baseURL": "http://127.0.0.1:1234/v1"
+      },
+      "whitelist": ["zai-org/glm-4.7-flash", "prism-ml/bonsai-27b"],
+      "models": {
+        "zai-org/glm-4.7-flash": {
+          "name": "GLM 4.7 Flash 6-bit (LM Studio)",
+          "temperature": false,
+          "options": {
+            "stop": ["<|user|>", "<|observation|>"]
+          },
+          "limit": {
+            "context": 32768,
+            "output": 8192
+          }
+        },
+        "prism-ml/bonsai-27b": {
+          "name": "Ternary Bonsai 27B 2-bit (LM Studio)",
+          "temperature": false,
+          "limit": {
+            "context": 65536,
+            "output": 8192
+          }
+        }
+      }
+    },
     "mlx": {
       "npm": "@ai-sdk/openai-compatible",
       "name": "MLX Local",
@@ -15,32 +44,24 @@
         "chunkTimeout": 600000
       },
       "models": {
-        "mlx-community/Qwen3.6-35B-A3B-6bit": {
-          "name": "Qwen 3.6 35B-A3B 6-bit",
+        "lmstudio-community/GLM-4.7-Flash-MLX-6bit": {
+          "name": "GLM 4.7 Flash 6-bit",
+          "temperature": false,
+          "limit": {
+            "context": 32768,
+            "output": 8192
+          }
+        },
+        "prism-ml/Ternary-Bonsai-27B-mlx-2bit": {
+          "name": "Ternary Bonsai 27B 2-bit",
           "temperature": false,
           "limit": {
             "context": 65536,
             "output": 8192
           }
         },
-        "Jundot/Qwen3.6-35B-A3B-oQ6-mtp": {
-          "name": "Qwen 3.6 35B-A3B oQ6 +MTP",
-          "temperature": false,
-          "limit": {
-            "context": 49152,
-            "output": 8192
-          }
-        },
-        "mlx-community/gemma-4-12B-it-qat-OptiQ-4bit": {
-          "name": "Gemma 4 12B QAT+OptiQ 4-bit",
-          "temperature": false,
-          "limit": {
-            "context": 65536,
-            "output": 8192
-          }
-        },
-        "badtheorylabs/Macaw-4bit-MLX": {
-          "name": "Macaw 4-bit (LFM2.5-2.6B)",
+        "mlx-community/Muse-Glimmer-30B-4bit": {
+          "name": "Muse Glimmer 30B 4-bit",
           "temperature": false,
           "limit": {
             "context": 65536,
@@ -50,8 +71,13 @@
       }
     }
   },
-  "model": "vercel/alibaba/qwen3.8-max",
+  "model": "zai/glm-5.2",
   "default_agent": "build",
+  "agent": {
+    "title": {
+      "disable": true
+    }
+  },
   "watcher": {
     "ignore": ["node_modules/**", "dist/**", "build/**", ".next/**", "*.log"]
   },
@@ -92,7 +118,11 @@
     "smart-coding": {
       "type": "local",
       "enabled": true,
-      "command": ["/Users/p/.smart-coding-omlx/node_modules/.bin/smart-coding-mcp", "--workspace", "."],
+      "command": [
+        "/Users/p/.smart-coding-omlx/node_modules/.bin/smart-coding-mcp",
+        "--workspace",
+        "."
+      ],
       "environment": {
         "SMART_CODING_SMART_INDEXING": "true",
         "SMART_CODING_WATCH_FILES": "true",

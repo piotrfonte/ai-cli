@@ -1,0 +1,68 @@
+{
+  "coding_model": "mlx-community/Muse-Glimmer-30B-4bit",
+  "summarizer_model": "mlx-community/Muse-Glimmer-30B-4bit",
+  "coding_chars": 48000,
+  "capture_chars": 24000,
+  "control": {
+    "role": "coding",
+    "model": "mlx-community/Muse-Glimmer-30B-4bit",
+    "wall_s": 117.14,
+    "ok": true,
+    "finish_reason": "length",
+    "prompt_tokens": 13165,
+    "completion_tokens": 2048,
+    "cached_tokens": 12288,
+    "model_load_duration": null,
+    "total_time": 117.11
+  },
+  "contended": {
+    "coding": {
+      "role": "coding",
+      "model": "mlx-community/Muse-Glimmer-30B-4bit",
+      "wall_s": 152.7,
+      "ok": true,
+      "finish_reason": "length",
+      "prompt_tokens": 13165,
+      "completion_tokens": 2048,
+      "cached_tokens": 12288,
+      "model_load_duration": null,
+      "total_time": 152.68,
+      "started_at_s": 2.0
+    },
+    "capture": {
+      "model": "mlx-community/Muse-Glimmer-30B-4bit",
+      "context_chars": 24086,
+      "request_chars": 27112,
+      "abort_budget_s": 1000000000.0,
+      "wall_s": 99.1,
+      "ok": true,
+      "finish_reason": "tool_calls",
+      "prompt_tokens": 7494,
+      "completion_tokens": 1148,
+      "cached_tokens": 6144,
+      "tool_calls": 1,
+      "reasoning_chars": 4223,
+      "content_chars": 0,
+      "tool_name": "save_memory",
+      "tool_args_parse": true,
+      "memory_type": "analysis",
+      "summary_chars": 892,
+      "tags": [
+        "auto-capture",
+        "timeout",
+        "summarizer",
+        "omlx"
+      ],
+      "answered": true,
+      "within_budget": true,
+      "gate0": true
+    },
+    "overlap_wall_s": 154.71
+  },
+  "gate1": {
+    "control_tok_s_endtoend": 17.48,
+    "contended_tok_s_endtoend": 13.41,
+    "retained_pct": 76.7,
+    "passes": true
+  }
+}

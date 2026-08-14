@@ -1,0 +1,21 @@
+{
+  "label": "reverted",
+  "short": {
+    "wall_s": 10.54,
+    "finish_reason": "stop",
+    "reasoning_chars": 1366,
+    "content_chars": 227,
+    "completion_tokens": 295,
+    "content_head": "A paged KV cache for a coding agent stores cached key-value pairs from the transformer attention mechanism to optimize memory usage and improve inference speed by reusing previously computed states across code generation",
+    "reasoning_head": "I need to answer what a paged KV cache does for a coding agent in one sentence, without any additional text or explanation.\n\nA paged KV cache (Key-Value cache) is a technique used in large language models to improve memo"
+  },
+  "t2_real": {
+    "wall_s": 24.35,
+    "finish_reason": "stop",
+    "reasoning_chars": 7827,
+    "content_chars": 964,
+    "completion_tokens": 1688,
+    "content_head": "```javascript\nexport function mergeModelSettings(existing, desired) {\n  const models = existing.models ? existing.models : {};\n  const newModels = JSON.parse(JSON.stringify(models));\n  \n  const changed = new Set();\n  \n  ",
+    "reasoning_head": "Let me analyze the requirements:\n\n1. Function `mergeModelSettings(existing, desired)` that takes:\n   - `existing`: parsed contents of oMLX's model_settings.json with structure `{ version: 1, models: { \"<id>\": { ...settin"
+  }
+}

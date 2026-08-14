@@ -1,0 +1,21 @@
+{
+  "label": "pinoff",
+  "short": {
+    "wall_s": 14.96,
+    "finish_reason": "stop",
+    "reasoning_chars": 2607,
+    "content_chars": 168,
+    "completion_tokens": 549,
+    "content_head": "A paged KV cache stores attention key-value states across code generation requests, enabling efficient memory reuse and cached context to reduce computational overhead.",
+    "reasoning_head": "The user is asking a specific question about a paged KV cache in the context of a coding agent repository. They want a one-sentence answer and don't want any prose.\n\nThe instructions state: \"When asked a question about t"
+  },
+  "t2_real": {
+    "wall_s": 132.25,
+    "finish_reason": "length",
+    "reasoning_chars": 0,
+    "content_chars": 32997,
+    "completion_tokens": 8192,
+    "content_head": "Let me understand the requirements:\n\n1. I need to write an ES module with a function `mergeModelSettings(existing, desired)`\n2. `existing` is parsed model_settings.json with shape `{ version: 1, models: { \"<id>\": { ...se",
+    "reasoning_head": ""
+  }
+}

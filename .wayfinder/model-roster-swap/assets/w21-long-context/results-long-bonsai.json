@@ -1,0 +1,289 @@
+{
+  "model": "prism-ml/Ternary-Bonsai-27B-mlx-2bit",
+  "stage": 2,
+  "suite": [
+    "T1_tool_chain",
+    "T2_merge_module",
+    "T4_extend_no_regress"
+  ],
+  "repeats": 3,
+  "corpus_chars": 54831,
+  "peak_prompt_tokens": 18679,
+  "budget_prompt_tokens": 24576,
+  "within_budget": true,
+  "counts": {
+    "pass@1": 7,
+    "fail": 1,
+    "pass@2": 1
+  },
+  "pass_at_1": 7,
+  "pass_at_2_or_better": 8,
+  "total_runs": 9,
+  "total_wall_s": 1111.9,
+  "runs": [
+    {
+      "verdict": "pass@1",
+      "attempts": [
+        {
+          "ok": true,
+          "detail": "",
+          "answer": "applyDesired in scripts/patch-omlx-mtp.mjs"
+        }
+      ],
+      "wall_s": 145.73,
+      "prompt_tokens": 53888,
+      "completion_tokens": 575,
+      "reasoning_chars": 1709,
+      "finish_reasons": [
+        "tool_calls",
+        "tool_calls",
+        "stop"
+      ],
+      "error": null,
+      "files_read": [
+        "scripts/patch-omlx-mtp.mjs",
+        "scripts/patch-opencode-mem-cap.mjs",
+        "scripts/patch-smart-coding-excludes.mjs"
+      ],
+      "calls": [
+        "list_dir",
+        "read_file",
+        "read_file",
+        "read_file"
+      ],
+      "task": "T1_tool_chain",
+      "repeat": 0,
+      "elapsed_s": 145.74
+    },
+    {
+      "verdict": "pass@1",
+      "attempts": [
+        {
+          "ok": true,
+          "detail": "",
+          "answer": "The file is `scripts/patch-omlx-mtp.mjs` and the function is `applyDesired`. This function folds the `desired` settings into the existing model settings one model at a time, copying through entries for models that don't appear in `desired` untouched, and returns the full settings object with `changed` flag indicating which models were updated."
+        }
+      ],
+      "wall_s": 63.8,
+      "prompt_tokens": 71644,
+      "completion_tokens": 570,
+      "reasoning_chars": 1714,
+      "finish_reasons": [
+        "tool_calls",
+        "tool_calls",
+        "tool_calls",
+        "stop"
+      ],
+      "error": null,
+      "files_read": [
+        "scripts/patch-omlx-mtp.mjs",
+        "scripts/patch-omlx-mla-kv.mjs"
+      ],
+      "calls": [
+        "list_dir",
+        "read_file",
+        "read_file"
+      ],
+      "task": "T1_tool_chain",
+      "repeat": 1,
+      "elapsed_s": 63.8
+    },
+    {
+      "verdict": "pass@1",
+      "attempts": [
+        {
+          "ok": true,
+          "detail": "",
+          "answer": "applyDesired in scripts/patch-omlx-mtp.mjs"
+        }
+      ],
+      "wall_s": 39.2,
+      "prompt_tokens": 53888,
+      "completion_tokens": 511,
+      "reasoning_chars": 1459,
+      "finish_reasons": [
+        "tool_calls",
+        "tool_calls",
+        "stop"
+      ],
+      "error": null,
+      "files_read": [
+        "scripts/patch-omlx-mtp.mjs",
+        "scripts/patch-opencode-mem-cap.mjs",
+        "scripts/patch-smart-coding-excludes.mjs"
+      ],
+      "calls": [
+        "list_dir",
+        "read_file",
+        "read_file",
+        "read_file"
+      ],
+      "task": "T1_tool_chain",
+      "repeat": 2,
+      "elapsed_s": 39.2
+    },
+    {
+      "verdict": "pass@1",
+      "attempts": [
+        {
+          "state": "ok",
+          "detail": "PASS",
+          "code": "export function mergeModelSettings(existing, desired) {\n  const clone = JSON.parse(JSON.stringify(existing));\n\n  if (!clone.models) {\n    clone.models = {};\n  }\n  if (clone.version === undefined) {\n    clone.version = 1;\n  }\n\n  let changed = false;\n\n  for (const [modelId, settings] of Object.entries(desired)) {\n    const parts = modelId.split('/');\n    const leaf = parts[parts.length - 1];\n    const keys = [modelId, leaf];\n\n    for (const key of keys) {\n      if (settings === undefined) continue;\n\n      const target = clone.models[key];\n      if (target === undefined) {\n        clone.models[key] = JSON.parse(JSON.stringify(settings));\n        changed = true;\n      } else {\n        if (deepMerge(target, settings)) {\n          changed = true;\n        }\n      }\n    }\n  }\n\n  return { settings: clone, changed };\n}\n\nfunction isPlainObject(v) {\n  return v !== null && typeof v === 'object' && !Array.isArray(v);\n}\n\nfunction deepMerge(target, source) {\n  let changed = false;\n  for (const key of Object.keys(source)) {\n    const src = source[key];\n    const tgt = target[key];\n\n    if (tgt !== undefined && tgt === src) {\n      continue;\n    }\n\n    if (isPlainObject(tgt) && isPlainObject(src)) {\n      if (deepMerge(tgt, src)) {\n        changed = true;\n      }\n    } else {\n      target[key] = src;\n      changed = true;\n    }\n  }\n  return changed;\n}"
+        }
+      ],
+      "wall_s": 325.07,
+      "prompt_tokens": 17469,
+      "completion_tokens": 5348,
+      "reasoning_chars": 17972,
+      "finish_reasons": [
+        "stop"
+      ],
+      "error": null,
+      "task": "T2_merge_module",
+      "repeat": 0,
+      "elapsed_s": 325.11
+    },
+    {
+      "verdict": "pass@1",
+      "attempts": [
+        {
+          "state": "ok",
+          "detail": "PASS",
+          "code": "export function mergeModelSettings(existing, desired) {\n  const models = existing.models ? { ...existing.models } : {};\n  const settings = {\n    version: existing.version ?? 1,\n    models,\n  };\n\n  let changed = false;\n\n  for (const id in desired) {\n    const leaf = id.split('/').pop();\n    const desiredSettings = desired[id];\n\n    for (const key of [id, leaf]) {\n      const existingEntry = models[key] ?? {};\n      const merged = { ...existingEntry, ...desiredSettings };\n\n      const keys = new Set([...Object.keys(existingEntry), ...Object.keys(desiredSettings)]);\n      for (const k of keys) {\n        if (JSON.stringify(existingEntry[k]) !== JSON.stringify(merged[k])) {\n          changed = true;\n        }\n      }\n\n      models[key] = merged;\n    }\n  }\n\n  return { settings, changed };\n}"
+        }
+      ],
+      "wall_s": 156.18,
+      "prompt_tokens": 17469,
+      "completion_tokens": 3395,
+      "reasoning_chars": 13370,
+      "finish_reasons": [
+        "stop"
+      ],
+      "error": null,
+      "task": "T2_merge_module",
+      "repeat": 1,
+      "elapsed_s": 156.22
+    },
+    {
+      "verdict": "fail",
+      "attempts": [
+        {
+          "state": "failed",
+          "detail": "file:///private/tmp/claude-501/-Users-p-Development-ai-cli/acea0ec4-aa67-47a9-83cc-4f312579437d/scratchpad/w21/prism-ml_Ternary-Bonsai-27B-mlx-2bit/T2_merge_module-2/mod.mjs:6\n    const keys = new Set([...(Object.keys(a) || []), ...((Object.keys(b) || [])]);\n                                                                               ^\n\nSyntaxError: Unexpected token ']'\n    at compileSourceTextModule (node:internal/modules/esm/utils:318:16)\n    at ModuleLoader.moduleStrategy (node:internal/modules/esm/translators:90:18)\n    at #translate (node:internal/modules/esm/loader:451:20)\n    at afterLoad (node:internal/modules/esm/loader:507:29)\n    at ModuleLoader.loadAndTranslate (node:internal/modules/esm/loader:512:12)\n    at #getOrCreateModuleJobAfterResolve (node:internal/modules/esm/loader:555:36)\n    at afterResolve (node:internal/modules/esm/loader:603:52)\n    at ModuleLoader.getOrCreateModuleJob (node:internal/modules/esm/loader:609:12)\n    at ModuleJob.syncLink (node:internal/modules/esm/module_job:162:33)\n    at ModuleJob.link (node:internal/modules/esm/module_job:252:17)\n\nNode.js v24.15.0",
+          "code": "const { deepEqual, deepMerge, mergeModelSettings } = (function () {\n  function deepEqual(a, b) {\n    if (a === b) return true;\n    if (a == null || b == null) return false;\n    if (typeof a !== 'object' || typeof b !== 'object') return false;\n    const keys = new Set([...(Object.keys(a) || []), ...((Object.keys(b) || [])]);\n    for (const key of keys) {\n      if (!deepEqual(a[key], b[key])) return false;\n    }\n    return true;\n  }\n\n  function deepMerge(oldObj, newObj) {\n    const result = {};\n    const oldKeys = new Set(Object.keys(oldObj || {}));\n    const newKeys = new Set(Object.keys(newObj || {}));\n    const allKeys = new Set([...oldKeys, ...newKeys]);\n    for (const key of allKeys) {\n      const oldVal = oldObj?.[key];\n      const newVal = newObj[key];\n      if (\n        oldVal != null &&\n        newVal != null &&\n        typeof oldVal === 'object' &&\n        typeof newVal === 'object' &&\n        !Array.isArray(oldVal) &&\n        !Array.isArray(newVal)\n      ) {\n        result[key] = deepMerge(oldVal, newVal);\n      } else {\n        result[key] = newVal;\n      }\n    }\n    return result;\n  }\n\n  function mergeModelSettings(existing, desired) {\n    let changed = false;\n\n    // Build a fresh copy of the models object\n    const models = deepMerge(existing.models || {}, {});\n\n    for (const id in desired) {\n      const leaf = id.split('/').slice(-1)[0];\n      const desiredSettings = desired[id];\n\n      // Ensure both the two-level id and the leaf id exist as entries\n      if (models[id] === undefined) {\n        models[id] = {};\n      }\n      if (models[leaf] === undefined) {\n        models[leaf] = {};\n      }\n\n      // Determine the merged values (pre-compute to check equality)\n      const mergedId = deepMerge(models[id], desiredSettings);\n      const mergedLeaf = deepMerge(models[leaf], desiredSettings);\n\n      // Check if the merged value actually differs from what was there\n      if (!deepEqual(mergedId, models[id])) {\n        changed = true;\n        models[id] = "
+        },
+        {
+          "state": "failed",
+          "detail": "FAIL\n  B1 re-run reports changed=false -> true\n  C1 unrelated two-level entry preserved -> {\"a/b\":{\"x\":1},\"b\":{\"x\":1}}\n  C2 unrelated leaf entry preserved -> {\"a/b\":{\"x\":1},\"b\":{\"x\":1}}\n  D1 sibling key kept -> {\"x\":1}\n  D3 leaf merged too -> {\"x\":1}",
+          "code": "const { deepEqual, deepMerge, mergeModelSettings } = (function () {\n  function deepEqual(a, b) {\n    if (a === b) return true;\n    if (a == null || b == null) return false;\n    if (typeof a !== 'object' || typeof b !== 'object') return false;\n    const keys = new Set([...Object.keys(a ?? {}), ...(Object.keys(b ?? {}) || [])]);\n    for (const key of keys) {\n      if (!deepEqual(a[key], b[key])) return false;\n    }\n    return true;\n  }\n\n  function deepMerge(oldObj, newObj) {\n    const result = {};\n    const allKeys = new Set([...(Object.keys(oldObj || {})), ...(Object.keys(newObj || {}) || [])]);\n    for (const key of allKeys) {\n      const oldVal = oldObj?.[key];\n      const newVal = newObj[key];\n      if (\n        oldVal != null &&\n        newVal != null &&\n        typeof oldVal === 'object' &&\n        typeof newVal === 'object' &&\n        !Array.isArray(oldVal) &&\n        !Array.isArray(newVal)\n      ) {\n        result[key] = deepMerge(oldVal, newVal);\n      } else {\n        result[key] = newVal;\n      }\n    }\n    return result;\n  }\n\n  function mergeModelSettings(existing, desired) {\n    let changed = false;\n\n    const models = deepMerge(existing.models || {}, {});\n\n    for (const id in desired) {\n      const leaf = id.split('/').slice(-1)[0];\n      const desiredSettings = desired[id];\n\n      if (models[id] === undefined) {\n        models[id] = {};\n      }\n      if (models[leaf] === undefined) {\n        models[leaf] = {};\n      }\n\n      const mergedId = deepMerge(models[id], desiredSettings);\n      const mergedLeaf = deepMerge(models[leaf], desiredSettings);\n\n      if (!deepEqual(mergedId, models[id])) {\n        changed = true;\n        models[id] = mergedId;\n      }\n      if (!deepEqual(mergedLeaf, models[leaf])) {\n        changed = true;\n        models[leaf] = mergedLeaf;\n      }\n    }\n\n    const version = existing.version ?? 1;\n\n    return { settings: { version, models }, changed };\n  }\n\n  return { deepEqual, deepMerge, mergeModelSettings };\n})();\n\nexport { merge"
+        }
+      ],
+      "wall_s": 109.97,
+      "prompt_tokens": 36006,
+      "completion_tokens": 1994,
+      "reasoning_chars": 3055,
+      "finish_reasons": [
+        "stop",
+        "stop"
+      ],
+      "error": null,
+      "task": "T2_merge_module",
+      "repeat": 2,
+      "elapsed_s": 110.04
+    },
+    {
+      "verdict": "pass@1",
+      "attempts": [
+        {
+          "phase": "A",
+          "state": "ok",
+          "detail": "PASS",
+          "code": "/**\n * Filters ESLint results to error-severity messages only for edited files.\n *\n * @param {Array<{ filePath: string, messages: Array<{ severity: number, ruleId: string | null, line: number, message: string }>, ... }>} results\n * @param {Set<string>} editedFiles\n * @returns {Array<{ file: string, line: number, rule: string | null, message: string }>}.\n */\nfunction blockingErrors(results, editedFiles) {\n  const matched = new Set(editedFiles);\n  const out = []\n\n  for (const result of results) {\n    const { filePath, messages } = result\n    if (!matched.has(filePath)) continue\n    for (const msg of messages) {\n      if (msg.severity === 2) {\n        out.push({\n          file: filePath,\n          line: msg.line,\n          rule: msg.ruleId,\n          message: msg.message,\n        })\n      }\n    }\n  }\n\n  out.sort((a, b) => {\n    if (a.file < b.file) return -1\n    if (a.file > b.file) return 1\n    return a.line - b.line\n  })\n\n  return out\n}\n\nexport { blockingErrors }"
+        },
+        {
+          "phase": "B",
+          "state": "ok",
+          "detail": "PASS",
+          "code": "/**\n * Filters ESLint results to error-severity messages, with special handling\n * for parse errors (null ruleId).\n *\n * @param {Array<{ filePath: string, messages: Array<{ severity: number, ruleId: string | null, line: number, message: string }>, ... }>} results\n * @param {Set<string>} editedFiles\n * @returns {Array<{ file: string, line: number, rule: string | null, message: string }>}.\n */\nfunction blockingErrors(results, editedFiles) {\n  const matched = new Set(editedFiles)\n  const out = []\n\n  for (const result of results) {\n    const { filePath, messages } = result\n    for (const msg of messages) {\n      const isParse = msg.ruleId === null\n      const shouldCollect = msg.severity === 2 && (isParse || matched.has(filePath))\n      if (shouldCollect) {\n        out.push({\n          file: filePath,\n          line: msg.line,\n          rule: msg.ruleId,\n          message: msg.message,\n        })\n      }\n    }\n  }\n\n  out.sort((a, b) => {\n    if (a.file < b.file) return -1\n    if (a.file > b.file) return 1\n    const aParse = a.rule === null\n    const bParse = b.rule === null\n    if (aParse !== bParse) return aParse ? -1 : 1\n    return a.line - b.line\n  })\n\n  return out\n}\n\nexport { blockingErrors }"
+        }
+      ],
+      "wall_s": 98.28,
+      "prompt_tokens": 35102,
+      "completion_tokens": 1918,
+      "reasoning_chars": 4934,
+      "finish_reasons": [
+        "stop",
+        "stop"
+      ],
+      "error": null,
+      "task": "T4_extend_no_regress",
+      "repeat": 0,
+      "elapsed_s": 98.34
+    },
+    {
+      "verdict": "pass@2",
+      "attempts": [
+        {
+          "phase": "A",
+          "state": "ok",
+          "detail": "PASS",
+          "code": "/**\n * Filter ESLint results to blocking errors on edited files only.\n *\n * @param {Array<{filePath: string, messages: Array<{severity: number, ruleId: string|null, line: number, message: string}>>>} results\n * @param {Set<string>} editedFiles\n * @returns {Array<{file: string, line: number, rule: string|null, message: string>>}\n */\nexport function blockingErrors(results, editedFiles) {\n  const filtered = results\n    .flatMap(({ filePath, messages }) =>\n      editedFiles.has(filePath)\n        ? messages.filter((m) => m.severity === 2).map(({ line, ruleId: rule, message }) => ({ file: filePath, line, rule, message }))\n        : []\n    )\n    .sort((a, b) => a.file.localeCompare(b.file) || a.line - b.line);\n\n  return filtered;\n}"
+        },
+        {
+          "phase": "B",
+          "state": "failed",
+          "detail": "file:///private/tmp/claude-501/-Users-p-Development-ai-cli/acea0ec4-aa67-47a9-83cc-4f312579437d/scratchpad/w21/prism-ml_Ternary-Bonsai-27B-mlx-2bit/T4_extend_no_regress-1/mod.mjs:16\n            .filter((m) => m.severity === 2 && rule === null)\n                                               ^\n\nReferenceError: rule is not defined\n    at file:///private/tmp/claude-501/-Users-p-Development-ai-cli/acea0ec4-aa67-47a9-83cc-4f312579437d/scratchpad/w21/prism-ml_Ternary-Bonsai-27B-mlx-2bit/T4_extend_no_regress-1/mod.mjs:16:48\n    at Array.filter (<anonymous>)\n    at file:///private/tmp/claude-501/-Users-p-Development-ai-cli/acea0ec4-aa67-47a9-83cc-4f312579437d/scratchpad/w21/prism-ml_Ternary-Bonsai-27B-mlx-2bit/T4_extend_no_regress-1/mod.mjs:16:14\n    at Array.flatMap (<anonymous>)\n    at blockingErrors (file:///private/tmp/claude-501/-Users-p-Development-ai-cli/acea0ec4-aa67-47a9-83cc-4f312579437d/scratchpad/w21/prism-ml_Ternary-Bonsai-27B-mlx-2bit/T4_extend_no_regress-1/mod.mjs:10:6)\n    at file:///private/tmp/claude-501/-Users-p-Development-ai-cli/acea0ec4-aa67-47a9-83cc-4f312579437d/scratchpad/w21/prism-ml_Ternary-Bonsai-27B-mlx-2bit/T4_extend_no_regress-1/test.mjs:20:15\n    at ModuleJob.run (node:internal/modules/esm/module_job:437:25)\n    at async node:internal/modules/esm/loader:639:26\n    at async asyncRunEntryPointWithESMLoader (node:internal/modules/run_main:101:5)\n\nNode.js v24.15.0",
+          "code": "/**\n * Filter ESLint results to blocking errors on edited files only.\n *\n * @param {Array<{filePath: string, messages: Array<{severity: number, ruleId: string|null, line: number, message: string}>>>} results\n * @param {Set<string>} editedFiles\n * @returns {Array<{file: string, line: number, rule: string|null, message: string>>}\n */\nexport function blockingErrors(results, editedFiles) {\n  const filtered = results\n    .flatMap(({ filePath, messages }) =>\n      editedFiles.has(filePath)\n        ? messages\n            .filter((m) => m.severity === 2)\n            .map(({ line, ruleId: rule, message }) => ({ file: filePath, line, rule, message }))\n        : messages\n            .filter((m) => m.severity === 2 && rule === null)\n            .map(({ line, ruleId: rule, message }) => ({ file: filePath, line, rule, message }))\n    )\n    .sort((a, b) => {\n      const fileCmp = a.file.localeCompare(b.file);\n      if (fileCmp !== 0) return fileCmp;\n      const aIsParse = a.rule === null ? 0 : 1;\n      const bIsParse = b.rule === null ? 0 : 1;\n      if (aIsParse !== bIsParse) return aIsParse - bIsParse;\n      return a.line - b.line;\n    });\n\n  return filtered;\n}"
+        },
+        {
+          "phase": "repair",
+          "state": "ok",
+          "detail": "PASS",
+          "code": "/**\n * Filter ESLint results to blocking errors on edited files only.\n *\n * @param {Array<{filePath: string, messages: Array<{severity: number, ruleId: string|null, line: number, message: string}>>>} results\n * @param {Set<string>} editedFiles\n * @returns {Array<{file: string, line: number, rule: string|null, message: string>>}\n */\nexport function blockingErrors(results, editedFiles) {\n  const filtered = results\n    .flatMap(({ filePath, messages }) => {\n      const isEdited = editedFiles.has(filePath);\n      if (isEdited) {\n        return messages\n          .filter((m) => m.severity === 2)\n          .map(({ line, ruleId: rule, message }) => ({ file: filePath, line, rule, message }));\n      }\n      // Parse errors (null ruleId) are always included.\n      return messages\n        .filter((m) => m.severity === 2 && m.ruleId === null)\n        .map((m) => ({ file: filePath, line: m.line, rule: m.ruleId, message: m.message }));\n    })\n    .sort((a, b) => {\n      const fileCmp = a.file.localeCompare(b.file);\n      if (fileCmp !== 0) return fileCmp;\n      const aIsParse = a.rule === null ? 0 : 1;\n      const bIsParse = b.rule === null ? 0 : 1;\n      if (aIsParse !== bIsParse) return aIsParse - bIsParse;\n      return a.line - b.line;\n    });\n\n  return filtered;\n}"
+        }
+      ],
+      "wall_s": 117.96,
+      "prompt_tokens": 53703,
+      "completion_tokens": 2102,
+      "reasoning_chars": 4457,
+      "finish_reasons": [
+        "stop",
+        "stop",
+        "stop"
+      ],
+      "error": null,
+      "task": "T4_extend_no_regress",
+      "repeat": 1,
+      "elapsed_s": 118.07
+    },
+    {
+      "verdict": "pass@1",
+      "attempts": [
+        {
+          "phase": "A",
+          "state": "ok",
+          "detail": "PASS",
+          "code": "export function blockingErrors(results, editedFiles) {\n  const blockings = []\n  for (const result of results) {\n    if (!editedFiles.has(result.filePath)) continue\n    for (const msg of result.messages) {\n      if (msg.severity !== 2) continue\n      blockings.push({\n        file: result.filePath,\n        line: msg.line,\n        rule: msg.ruleId,\n        message: msg.message\n      })\n    }\n  }\n  blockings.sort((a, b) => {\n    if (a.file < b.file) return -1\n    if (a.file > b.file) return 1\n    return a.line - b.line\n  })\n  return blockings\n}"
+        },
+        {
+          "phase": "B",
+          "state": "ok",
+          "detail": "PASS",
+          "code": "export function blockingErrors(results, editedFiles) {\n  const blockings = []\n  for (const result of results) {\n    for (const msg of result.messages) {\n      if (msg.severity !== 2) continue\n      if (msg.ruleId !== null && !editedFiles.has(result.filePath)) continue\n      blockings.push({\n        file: result.filePath,\n        line: msg.line,\n        rule: msg.ruleId,\n        message: msg.message\n      })\n    }\n  }\n  blockings.sort((a, b) => {\n    const aParse = a.rule === null\n    const bParse = b.rule === null\n    if (aParse !== bParse) return aParse ? -1 : 1\n    if (a.file < b.file) return -1\n    if (a.file > b.file) return 1\n    return a.line - b.line\n  })\n  return blockings\n}"
+        }
+      ],
+      "wall_s": 55.28,
+      "prompt_tokens": 34983,
+      "completion_tokens": 906,
+      "reasoning_chars": 1982,
+      "finish_reasons": [
+        "stop",
+        "stop"
+      ],
+      "error": null,
+      "task": "T4_extend_no_regress",
+      "repeat": 2,
+      "elapsed_s": 55.36
+    }
+  ]
+}

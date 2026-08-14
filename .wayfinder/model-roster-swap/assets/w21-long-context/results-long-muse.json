@@ -1,0 +1,281 @@
+{
+  "model": "mlx-community/Muse-Glimmer-30B-4bit",
+  "stage": 2,
+  "suite": [
+    "T1_tool_chain",
+    "T2_merge_module",
+    "T4_extend_no_regress"
+  ],
+  "repeats": 3,
+  "corpus_chars": 54831,
+  "peak_prompt_tokens": 17637,
+  "budget_prompt_tokens": 24576,
+  "within_budget": true,
+  "counts": {
+    "fail": 1,
+    "pass@1": 8
+  },
+  "pass_at_1": 8,
+  "pass_at_2_or_better": 8,
+  "total_runs": 9,
+  "total_wall_s": 1529.8,
+  "runs": [
+    {
+      "verdict": "fail",
+      "attempts": [
+        {
+          "ok": false,
+          "detail": "final answer does not name applyDesired; final answer does not name the file",
+          "answer": ""
+        },
+        {
+          "ok": false,
+          "detail": "final answer does not name applyDesired; final answer does not name the file",
+          "answer": ""
+        }
+      ],
+      "wall_s": 157.16,
+      "prompt_tokens": 85497,
+      "completion_tokens": 1004,
+      "reasoning_chars": 3298,
+      "finish_reasons": [
+        "tool_calls",
+        "tool_calls",
+        "stop",
+        "tool_calls",
+        "stop"
+      ],
+      "error": null,
+      "files_read": [
+        "scripts/patch-omlx-mtp.mjs",
+        "scripts/patch-opencode-mem-cap.mjs"
+      ],
+      "calls": [
+        "list_dir",
+        "read_file",
+        "read_file"
+      ],
+      "task": "T1_tool_chain",
+      "repeat": 0,
+      "elapsed_s": 157.16
+    },
+    {
+      "verdict": "pass@1",
+      "attempts": [
+        {
+          "ok": true,
+          "detail": "",
+          "answer": "applyDesired in scripts/patch-omlx-mtp.mjs"
+        }
+      ],
+      "wall_s": 40.79,
+      "prompt_tokens": 51191,
+      "completion_tokens": 626,
+      "reasoning_chars": 1802,
+      "finish_reasons": [
+        "tool_calls",
+        "tool_calls",
+        "stop"
+      ],
+      "error": null,
+      "files_read": [
+        "scripts/patch-omlx-mtp.mjs",
+        "scripts/patch-opencode-mem-cap.mjs",
+        "scripts/patch-smart-coding-excludes.mjs"
+      ],
+      "calls": [
+        "list_dir",
+        "read_file",
+        "read_file",
+        "read_file"
+      ],
+      "task": "T1_tool_chain",
+      "repeat": 1,
+      "elapsed_s": 40.79
+    },
+    {
+      "verdict": "pass@1",
+      "attempts": [
+        {
+          "ok": true,
+          "detail": "",
+          "answer": "applyDesired in scripts/patch-omlx-mtp.mjs"
+        }
+      ],
+      "wall_s": 50.76,
+      "prompt_tokens": 51191,
+      "completion_tokens": 663,
+      "reasoning_chars": 1848,
+      "finish_reasons": [
+        "tool_calls",
+        "tool_calls",
+        "stop"
+      ],
+      "error": null,
+      "files_read": [
+        "scripts/patch-omlx-mtp.mjs",
+        "scripts/patch-opencode-mem-cap.mjs",
+        "scripts/patch-smart-coding-excludes.mjs"
+      ],
+      "calls": [
+        "list_dir",
+        "read_file",
+        "read_file",
+        "read_file"
+      ],
+      "task": "T1_tool_chain",
+      "repeat": 2,
+      "elapsed_s": 50.76
+    },
+    {
+      "verdict": "pass@1",
+      "attempts": [
+        {
+          "state": "ok",
+          "detail": "PASS",
+          "code": "export function mergeModelSettings(existing, desired) {\n  const base = existing && typeof existing === \"object\" ? existing : {};\n  const version = typeof base.version === \"number\" ? base.version : 1;\n  const existingModels = base.models && typeof base.models === \"object\" ? base.models : {};\n\n  const models = JSON.parse(JSON.stringify(existingModels));\n  let changed = false;\n\n  const isPlainObject = (v) => v && typeof v === \"object\" && !Array.isArray(v);\n\n  const deepMerge = (target, source) => {\n    const out = isPlainObject(target) ? { ...target } : {};\n    for (const [k, v] of Object.entries(source)) {\n      if (isPlainObject(v) && isPlainObject(target?.[k])) {\n        out[k] = deepMerge(target[k], v);\n      } else {\n        out[k] = v;\n      }\n    }\n    return out;\n  };\n\n  const deepEqual = (a, b) => JSON.stringify(a) === JSON.stringify(b);\n\n  const mergeKey = (key, desiredSettings) => {\n    const current = models[key];\n    if (current) {\n      const merged = deepMerge(current, desiredSettings);\n      if (!deepEqual(current, merged)) {\n        changed = true;\n        models[key] = merged;\n      }\n    } else {\n      changed = true;\n      models[key] = JSON.parse(JSON.stringify(desiredSettings));\n    }\n  };\n\n  if (desired && typeof desired === \"object\") {\n    for (const [id, settings] of Object.entries(desired)) {\n      if (!isPlainObject(settings)) continue;\n      const leaf = id.includes(\"/\") ? id.split(\"/\").pop() : id;\n      mergeKey(id, settings);\n      if (leaf !== id) mergeKey(leaf, settings);\n    }\n  }\n\n  return { settings: { version, models }, changed };\n}"
+        }
+      ],
+      "wall_s": 221.38,
+      "prompt_tokens": 16438,
+      "completion_tokens": 3323,
+      "reasoning_chars": 13342,
+      "finish_reasons": [
+        "stop"
+      ],
+      "error": null,
+      "task": "T2_merge_module",
+      "repeat": 0,
+      "elapsed_s": 221.42
+    },
+    {
+      "verdict": "pass@1",
+      "attempts": [
+        {
+          "state": "ok",
+          "detail": "PASS",
+          "code": "export function mergeModelSettings(existing, desired) {\n  const isPlainObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);\n\n  const cloneDeep = (v) => {\n    if (v === undefined) return undefined;\n    return JSON.parse(JSON.stringify(v));\n  };\n\n  const deepMerge = (target, source) => {\n    const out = {};\n    if (isPlainObject(target)) {\n      for (const k of Object.keys(target)) out[k] = cloneDeep(target[k]);\n    }\n    if (isPlainObject(source)) {\n      for (const k of Object.keys(source)) {\n        const sVal = source[k];\n        const tVal = out[k];\n        if (isPlainObject(sVal) && isPlainObject(tVal)) {\n          out[k] = deepMerge(tVal, sVal);\n        } else {\n          out[k] = cloneDeep(sVal);\n        }\n      }\n    }\n    return out;\n  };\n\n  const deepEqual = (a, b) => {\n    if (a === b) return true;\n    if (typeof a !== typeof b) return false;\n    if (!isPlainObject(a) || !isPlainObject(b)) return a === b;\n    const aKeys = Object.keys(a);\n    const bKeys = Object.keys(b);\n    if (aKeys.length !== bKeys.length) return false;\n    for (const k of aKeys) {\n      if (!deepEqual(a[k], b[k])) return false;\n    }\n    return true;\n  };\n\n  const safeExisting = existing && typeof existing === 'object' ? existing : {};\n  const version = 'version' in safeExisting ? safeExisting.version : 1;\n  const existingModels = safeExisting.models && typeof safeExisting.models === 'object' ? safeExisting.models : {};\n\n  const newModels = {};\n  for (const [k, v] of Object.entries(existingModels)) {\n    newModels[k] = cloneDeep(v);\n  }\n\n  let changed = false;\n\n  const mergeInto = (key, desiredSettings) => {\n    const prev = newModels[key];\n    const base = prev ? cloneDeep(prev) : {};\n    const merged = deepMerge(base, desiredSettings);\n    if (!prev || !deepEqual(base, merged)) {\n      changed = true;\n    }\n    newModels[key] = merged;\n  };\n\n  if (desired && typeof desired === 'object') {\n    for (const [id, settings] of Object.entries(desired)) {\n      const le"
+        }
+      ],
+      "wall_s": 204.81,
+      "prompt_tokens": 16438,
+      "completion_tokens": 3408,
+      "reasoning_chars": 12816,
+      "finish_reasons": [
+        "stop"
+      ],
+      "error": null,
+      "task": "T2_merge_module",
+      "repeat": 1,
+      "elapsed_s": 204.85
+    },
+    {
+      "verdict": "pass@1",
+      "attempts": [
+        {
+          "state": "ok",
+          "detail": "PASS",
+          "code": "export function mergeModelSettings(existing, desired) {\n  const base = existing && typeof existing === 'object' ? existing : {};\n  const version = typeof base.version === 'number' ? base.version : 1;\n  const origModels = base.models && typeof base.models === 'object' ? base.models : {};\n\n  const models = {};\n  for (const k of Object.keys(origModels)) {\n    models[k] = structuredClone(origModels[k]);\n  }\n\n  const isPlainObject = v => v && typeof v === 'object' && !Array.isArray(v);\n\n  const deepMerge = (target, source) => {\n    let anyChange = false;\n    for (const key of Object.keys(source)) {\n      const srcVal = source[key];\n      const tgtVal = target[key];\n      if (isPlainObject(srcVal)) {\n        if (!isPlainObject(tgtVal)) {\n          target[key] = structuredClone(srcVal);\n          anyChange = true;\n        } else {\n          const changedNested = deepMerge(tgtVal, srcVal);\n          if (changedNested) anyChange = true;\n        }\n      } else {\n        if (tgtVal !== srcVal) {\n          target[key] = structuredClone(srcVal);\n          anyChange = true;\n        }\n      }\n    }\n    return anyChange;\n  };\n\n  let changed = false;\n\n  if (desired && typeof desired === 'object') {\n    for (const [id, settings] of Object.entries(desired)) {\n      if (!isPlainObject(settings)) continue;\n      const leaf = id.includes('/') ? id.split('/').pop() : id;\n      const targets = id === leaf ? [id] : [id, leaf];\n      for (const targetId of targets) {\n        const existingEntry = models[targetId];\n        if (!existingEntry) {\n          models[targetId] = structuredClone(settings);\n          changed = true;\n        } else {\n          const changedLocal = deepMerge(existingEntry, settings);\n          if (changedLocal) changed = true;\n        }\n      }\n    }\n  }\n\n  const settings = { version, models };\n  return { settings, changed };\n}"
+        }
+      ],
+      "wall_s": 328.69,
+      "prompt_tokens": 16438,
+      "completion_tokens": 5288,
+      "reasoning_chars": 22746,
+      "finish_reasons": [
+        "stop"
+      ],
+      "error": null,
+      "task": "T2_merge_module",
+      "repeat": 2,
+      "elapsed_s": 328.72
+    },
+    {
+      "verdict": "pass@1",
+      "attempts": [
+        {
+          "phase": "A",
+          "state": "ok",
+          "detail": "PASS",
+          "code": "export function blockingErrors(results, editedFiles) {\n  const out = [];\n  if (!Array.isArray(results)) return out;\n\n  for (const result of results) {\n    if (!result || typeof result.filePath !== 'string') continue;\n    if (!editedFiles.has(result.filePath)) continue;\n    if (!Array.isArray(result.messages)) continue;\n\n    for (const msg of result.messages) {\n      if (!msg) continue;\n      if (msg.severity !== 2) continue;\n      out.push({\n        file: result.filePath,\n        line: msg.line,\n        rule: msg.ruleId,\n        message: msg.message,\n      });\n    }\n  }\n\n  out.sort((a, b) => {\n    if (a.file < b.file) return -1;\n    if (a.file > b.file) return 1;\n    return a.line - b.line;\n  });\n\n  return out;\n}"
+        },
+        {
+          "phase": "B",
+          "state": "ok",
+          "detail": "PASS",
+          "code": "export function blockingErrors(results, editedFiles) {\n  const out = [];\n  if (!Array.isArray(results)) return out;\n\n  for (const result of results) {\n    if (!result || typeof result.filePath !== 'string') continue;\n    if (!Array.isArray(result.messages)) continue;\n\n    for (const msg of result.messages) {\n      if (!msg) continue;\n      if (msg.severity !== 2) continue;\n\n      const isParse = msg.ruleId === null;\n      if (!isParse && !editedFiles.has(result.filePath)) continue;\n\n      out.push({\n        file: result.filePath,\n        line: msg.line,\n        rule: msg.ruleId,\n        message: msg.message,\n      });\n    }\n  }\n\n  out.sort((a, b) => {\n    if (a.file < b.file) return -1;\n    if (a.file > b.file) return 1;\n    const aParse = a.rule === null;\n    const bParse = b.rule === null;\n    if (aParse && !bParse) return -1;\n    if (!aParse && bParse) return 1;\n    return a.line - b.line;\n  });\n\n  return out;\n}"
+        }
+      ],
+      "wall_s": 191.25,
+      "prompt_tokens": 32952,
+      "completion_tokens": 2297,
+      "reasoning_chars": 8313,
+      "finish_reasons": [
+        "stop",
+        "stop"
+      ],
+      "error": null,
+      "task": "T4_extend_no_regress",
+      "repeat": 0,
+      "elapsed_s": 191.32
+    },
+    {
+      "verdict": "pass@1",
+      "attempts": [
+        {
+          "phase": "A",
+          "state": "ok",
+          "detail": "PASS",
+          "code": "export function blockingErrors(results, editedFiles) {\n  if (!Array.isArray(results)) return [];\n  const edited = editedFiles instanceof Set ? editedFiles : new Set(editedFiles);\n  const items = [];\n\n  for (const entry of results) {\n    if (!entry || typeof entry.filePath !== 'string') continue;\n    if (!edited.has(entry.filePath)) continue;\n    if (!Array.isArray(entry.messages)) continue;\n\n    for (const msg of entry.messages) {\n      if (!msg || msg.severity !== 2) continue;\n      items.push({\n        file: entry.filePath,\n        line: typeof msg.line === 'number' ? msg.line : 0,\n        rule: msg.ruleId ?? null,\n        message: msg.message ?? ''\n      });\n    }\n  }\n\n  items.sort((a, b) => {\n    if (a.file < b.file) return -1;\n    if (a.file > b.file) return 1;\n    return a.line - b.line;\n  });\n\n  return items;\n}"
+        },
+        {
+          "phase": "B",
+          "state": "ok",
+          "detail": "PASS",
+          "code": "export function blockingErrors(results, editedFiles) {\n  if (!Array.isArray(results)) return [];\n  const edited = editedFiles instanceof Set ? editedFiles : new Set(editedFiles);\n  const items = [];\n\n  for (const entry of results) {\n    if (!entry || typeof entry.filePath !== 'string') continue;\n    if (!Array.isArray(entry.messages)) continue;\n\n    const file = entry.filePath;\n    const fileIsEdited = edited.has(file);\n\n    for (const msg of entry.messages) {\n      if (!msg || msg.severity !== 2) continue;\n      const isParse = msg.ruleId === null;\n      if (!fileIsEdited && !isParse) continue;\n\n      items.push({\n        file,\n        line: typeof msg.line === 'number' ? msg.line : 0,\n        rule: msg.ruleId ?? null,\n        message: msg.message ?? ''\n      });\n    }\n  }\n\n  items.sort((a, b) => {\n    if (a.file < b.file) return -1;\n    if (a.file > b.file) return 1;\n    const aParse = a.rule === null;\n    const bParse = b.rule === null;\n    if (aParse && !bParse) return -1;\n    if (!aParse && bParse) return 1;\n    return a.line - b.line;\n  });\n\n  return items;\n}"
+        }
+      ],
+      "wall_s": 182.59,
+      "prompt_tokens": 32977,
+      "completion_tokens": 2409,
+      "reasoning_chars": 8645,
+      "finish_reasons": [
+        "stop",
+        "stop"
+      ],
+      "error": null,
+      "task": "T4_extend_no_regress",
+      "repeat": 1,
+      "elapsed_s": 182.66
+    },
+    {
+      "verdict": "pass@1",
+      "attempts": [
+        {
+          "phase": "A",
+          "state": "ok",
+          "detail": "PASS",
+          "code": "export function blockingErrors(results, editedFiles) {\n  const out = [];\n  for (const result of results) {\n    const file = result.filePath;\n    if (!editedFiles.has(file)) continue;\n    const messages = Array.isArray(result.messages) ? result.messages : [];\n    for (const msg of messages) {\n      if (msg.severity === 2) {\n        out.push({\n          file,\n          line: msg.line,\n          rule: msg.ruleId,\n          message: msg.message\n        });\n      }\n    }\n  }\n  out.sort((a, b) => {\n    if (a.file < b.file) return -1;\n    if (a.file > b.file) return 1;\n    return a.line - b.line;\n  });\n  return out;\n}"
+        },
+        {
+          "phase": "B",
+          "state": "ok",
+          "detail": "PASS",
+          "code": "export function blockingErrors(results, editedFiles) {\n  const out = [];\n\n  for (const result of results ?? []) {\n    const file = result.filePath;\n    const messages = Array.isArray(result.messages) ? result.messages : [];\n\n    for (const msg of messages) {\n      if (msg.severity !== 2) continue;\n\n      const isParse = msg.ruleId === null;\n      const include = isParse || editedFiles.has(file);\n      if (!include) continue;\n\n      out.push({\n        file,\n        line: msg.line,\n        rule: msg.ruleId,\n        message: msg.message\n      });\n    }\n  }\n\n  out.sort((a, b) => {\n    if (a.file < b.file) return -1;\n    if (a.file > b.file) return 1;\n\n    const aParse = a.rule === null;\n    const bParse = b.rule === null;\n\n    if (aParse && !bParse) return -1;\n    if (!aParse && bParse) return 1;\n\n    return a.line - b.line;\n  });\n\n  return out;\n}"
+        }
+      ],
+      "wall_s": 152.06,
+      "prompt_tokens": 32925,
+      "completion_tokens": 2050,
+      "reasoning_chars": 7579,
+      "finish_reasons": [
+        "stop",
+        "stop"
+      ],
+      "error": null,
+      "task": "T4_extend_no_regress",
+      "repeat": 2,
+      "elapsed_s": 152.13
+    }
+  ]
+}

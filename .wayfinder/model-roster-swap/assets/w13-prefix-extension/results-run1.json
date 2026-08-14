@@ -1,0 +1,30 @@
+[
+  {
+    "label": "A  turn 1 (cold, ~12.8k)",
+    "prompt_tokens": 12839,
+    "cached": 0,
+    "seconds": 62.33,
+    "tok_s": 206
+  },
+  {
+    "label": "B  turn 2 (extends A by ~2k)",
+    "prompt_tokens": 21832,
+    "cached": 12288,
+    "seconds": 51.09,
+    "tok_s": 427
+  },
+  {
+    "label": "C  turn 3 (extends B by ~2k)",
+    "prompt_tokens": 30818,
+    "cached": 20480,
+    "seconds": 59.03,
+    "tok_s": 522
+  },
+  {
+    "label": "D  repeat of A (pure warm)",
+    "prompt_tokens": 12839,
+    "cached": 12288,
+    "seconds": 3.18,
+    "tok_s": 4041
+  }
+]

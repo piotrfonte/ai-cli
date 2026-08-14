@@ -30,21 +30,62 @@
   // Keeps memory extraction on-box. Requires the oMLX server (ai.sh) running.
   "memoryProvider": "openai-chat",
   "memoryApiUrl": "http://127.0.0.1:10081/v1",
-  "memoryModel": "mlx-community/Qwen3.6-35B-A3B-6bit",
+  // The fallback only — ai.sh sets OPENCODE_MEM_MODEL to the session's own model
+  // on every launch, and the patched config.js prefers it, so the summarizer
+  // reuses the model already resident instead of loading a second one. This value
+  // is what a bare `opencode` (gateway session, no ai.sh) falls back to, so it
+  // must name a model oMLX can actually serve: the default profile. It moved with
+  // the default on 2026-08-14, Muse Glimmer -> Ternary Bonsai.
+  "memoryModel": "prism-ml/Ternary-Bonsai-27B-mlx-2bit",
   "memoryApiKey": "mlx",
   "autoCaptureEnabled": true,
-  // oMLX does continuous batching (--max-concurrent-requests 2), so the
-  // summarizer no longer fights the coding turn for a single decode slot —
-  // its calls overlap. Raised 3 → 8 now that contention is gone.
+
+  // ── The three settings below are one package. W20 measured them together. ──
   //
-  // NOTE: the summarizer is a raw OpenAI client to oMLX (memoryApiUrl below), so
-  // it bypasses opencode.json's context limit. Left unbounded it fed oMLX the
-  // full turn transcript (~120k tokens), saturating the memory guard — coding
-  // turns throttled, concurrent bge-m3 loads 507'd. ai.sh patches the plugin
-  // (scripts/patch-opencode-mem-cap.mjs) to cap the summarizer input to
-  // OPENCODE_MEM_MAX_CONTEXT_CHARS chars (default 24000 ≈ 6k tokens), which is
-  // what makes this overlap safe. Don't raise iterations without that cap.
-  "autoCaptureMaxIterations": 8,
+  // W18 made Muse Glimmer the default, so the summarizer became a 26 tok/s model.
+  // At that rate a capture takes 44-99 s, and the plugin aborts each iteration at
+  // 30 s — so on the stock settings auto-capture NEVER completed on the default.
+  // It was broken, not merely slow. Measured: 0 of 8 captures finished in time.
+  //
+  // THE DEFAULT MOVED TO BONSAI ON 2026-08-14 AND THESE VALUES DID NOT. They are
+  // measured on Muse, which is --muse now, and the summarizer follows the session
+  // model — so a --muse session still meets the case they were sized for. Nothing
+  // has re-measured a capture on Bonsai. Do not tighten them back toward the stock
+  // 30 s on the argument that Bonsai decodes faster: the failure they prevent is a
+  // silently dropped memory, and a timeout that is too generous costs nothing.
+  //
+  // The abort is DECODE-bound, not prefill-bound, which is why the obvious cure
+  // fails: shrinking OPENCODE_MEM_MAX_CONTEXT_CHARS cuts the prefill but makes
+  // Muse reason MORE, so the wall goes UP — 44 s at 24000 chars, 76 s at 2000.
+  // Do not "fix" a timeout here by lowering the input cap. See W20.
+  //
+  // 1. iterationTimeout 30 s -> 180 s. Fits the measured worst case: a capture
+  //    that overlaps a coding turn stretched to 99 s. 180 s leaves real margin
+  //    without letting a wedged request sit forever.
+  "autoCaptureIterationTimeout": 180000,
+  // 2. maxIterations 8 -> 2. With the timeout at 180 s, 8 iterations is a 24-min
+  //    worst case during which every turn is slowed. Muse produced a valid
+  //    save_memory call on 8 of 8 solo runs, so retries are rare; 2 keeps one
+  //    retry for the occasional protocol miss and bounds the tail at ~6 min.
+  //    NOTE: iterations cannot rescue a timeout — iteration 1 already exceeded
+  //    the 30 s budget, and iteration 2 sends MORE (the loop appends).
+  "autoCaptureMaxIterations": 2,
+  // 3. max_tokens. The openai-chat provider sends NO max_tokens, so oMLX applied
+  //    its own 32,768 default (log: `request_max_tokens=None, max_tokens=32768`)
+  //    — a 21-minute runaway ceiling at 26 tok/s. memoryExtraParams is spread
+  //    into the request body and `max_tokens` is not in the provider's
+  //    PROTECTED_KEYS, so this is a supported config lever, not a patch.
+  //    2048, not lower: real captures emitted 689-1203 completion tokens, and a
+  //    cap that truncates yields finish_reason=length with no tool call at all.
+  "memoryExtraParams": { "max_tokens": 2048 },
+  //
+  // The input cap still matters, for the reason it was added: the summarizer is a
+  // raw OpenAI client to oMLX (memoryApiUrl above), so it bypasses opencode.json's
+  // context limit. Left unbounded it fed oMLX the full turn transcript (~120k
+  // tokens), saturating the memory guard — coding turns throttled, concurrent
+  // bge-m3 loads 507'd. ai.sh patches the plugin (scripts/patch-opencode-mem-cap.mjs)
+  // to cap the summarizer input to OPENCODE_MEM_MAX_CONTEXT_CHARS (default 24000
+  // chars ≈ 6k tokens). Keep it as a memory guard; it is not a latency lever.
 
   // ── Auto-recall — inject top memories at session start + post-compaction ──
   "chatMessage": {

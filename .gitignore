@@ -1,6 +1,8 @@
 .claude
 .smart-coding-cache
-logs
+# Anchored: a bare `logs` matches at any depth and silently swallowed the
+# measurement logs under .wayfinder/**/assets/*/logs/.
+/logs
 .DS_Store
 ai.env
 __pycache__

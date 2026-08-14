@@ -52,11 +52,10 @@ ai() {
   local ai_state_dir="${AI_STATE_DIR:-${HOME}/.local/state}"
 
   # ── MLX model config ──────────────────────────────────────────────────
-  # Each profile sets the served id/label/context plus the oMLX venv it needs.
-  # Every profile currently uses the same venv; the field stays per-profile because
-  # it costs nothing and it keeps _check_deps able to name the right build if a
-  # future model again needs one the others don't run.
-  local model_id model_label model_context_limit model_omlx_venv
+  # A profile is one model this launcher serves: a served id and a label for the
+  # UI. The context window is NOT set here — opencode.json owns it, so the two
+  # numbers can never disagree.
+  local model_id model_label
   local server_port="${AI_PORT:-10081}"
   local state_file="${ai_state_dir}/omlx-model"
   local pid_file="${ai_state_dir}/omlx-server.pid"
@@ -68,116 +67,170 @@ ai() {
   # recomputing them — the agentic-coding win. Built from source into a venv;
   # see CLAUDE.md for the build steps.
   #
-  # Only the profile-independent settings live here. The binary, the KV-cache
-  # directory and that cache's budget depend on which model runs, so they are
-  # resolved in _resolve_runtime() after the profile dispatch below.
+  # One build serves every profile, so the binary, the KV-cache directory and its
+  # budget no longer vary by model. _resolve_runtime() still resolves them in one
+  # place, because the environment may override each of them.
+  local omlx_venv="${OMLX_VENV:-${HOME}/.omlx/venv}"
+  local omlx_src_dir="${OMLX_SRC_DIR:-${HOME}/.omlx/src}"
   local omlx_model_dir="${OMLX_MODEL_DIR:-${HOME}/.omlx/models}"
+  # LM Studio's weight store, and the only copy of any model's weights. LM Studio
+  # writes flat <org>/<repo> directories here — NOT Hugging Face's
+  # models--<org>--<repo>/snapshots/<sha> layout — and oMLX reaches them through a
+  # symlink under $omlx_model_dir. See _ensure_model.
+  local hf_hub_dir="${HF_HUB_CACHE:-${HF_HOME:-${HOME}/.cache/huggingface}/hub}"
   local omlx_hot_cache="${OMLX_HOT_CACHE:-8GB}"       # in-RAM hot KV tier; model+tier must stay under the guard's soft threshold (85%)
   local omlx_memory_guard_gb="${OMLX_MEMORY_GUARD_GB:-48}"  # ceiling on 64 GB box
   local omlx_max_concurrent="${OMLX_MAX_CONCURRENT:-2}"     # continuous batching: 1 coding turn + 1 opencode-mem summarizer
 
-  # Filled by _resolve_runtime(); every reader runs after the profile dispatch.
-  local omlx_bin="" omlx_cache_dir="" omlx_ssd_cache_max="" omlx_cache_prune_gb=""
+  # Prompt-prefix warm-up. OFF by default — it lost a measurement. See _warm_prefix.
+  local warm_prefix="${AI_WARM_PREFIX:-0}"          # 1 enables it; only pays if you do not type straight away
+  local warm_mcp="${AI_WARM_PREFIX_MCP:-1}"         # 0 drops MCP from the warm-up, which makes it actively harmful
+  local warm_log="${ai_log_dir}/prefix-warm.log"
 
-  # Resolve the per-profile runtime. Environment overrides win over the profile,
-  # so a box with one oMLX build can still pin OMLX_BIN / OMLX_CACHE_DIR globally.
+  # Filled by _resolve_runtime(); every reader runs after it.
+  local omlx_bin="" omlx_build="" omlx_cache_dir="" omlx_ssd_cache_max="" omlx_cache_prune_gb=""
+
+  # Resolve the runtime. Environment overrides win, so a box with a second oMLX
+  # checkout can pin OMLX_BIN / OMLX_CACHE_DIR without touching this file.
   #
-  # The profile's own venv is preferred over an `omlx` on PATH: a PATH build is
-  # whatever was installed last, so it may not be the one this profile expects.
+  # The venv build is preferred over an `omlx` on PATH: a PATH build is whatever
+  # was installed last, so it may not be the one this launcher expects.
+  #
+  # omlx_build is the value the state file compares to decide whether a running
+  # server must restart. The binary PATH alone cannot see an in-place upgrade —
+  # the path is identical before and after — so the source checkout's git HEAD
+  # carries the signal: the venv install is editable, so that commit IS the code
+  # being served. An unresolvable HEAD reads as "unknown", which is stable and
+  # therefore never forces a spurious restart.
   #
   # oMLX's own LRU governs only the *live* index, so blocks orphaned by prior
-  # runs/model-quant switches leak on disk far over the cap (observed: 122 GB vs
-  # a 40 GB cap). _prune_cache enforces the budget at each server (re)start —
-  # safe because _start_server only runs while no oMLX server is up. The server
-  # cap and the prune target come from the same number so they cannot disagree.
-  # Set OMLX_CACHE_PRUNE_GB=0 to disable pruning.
+  # runs/model switches leak on disk far over the cap (observed: 122 GB vs a
+  # 40 GB cap). _prune_cache enforces the budget at each server (re)start — safe
+  # because _start_server only runs while no oMLX server is up. The server cap and
+  # the prune target come from the same number so they cannot disagree. Set
+  # OMLX_CACHE_PRUNE_GB=0 to disable pruning.
   _resolve_runtime() {
     omlx_bin="${OMLX_BIN:-}"
     if [[ -z "$omlx_bin" ]]; then
-      if [[ -x "${model_omlx_venv}/bin/omlx" ]]; then
-        omlx_bin="${model_omlx_venv}/bin/omlx"
+      if [[ -x "${omlx_venv}/bin/omlx" ]]; then
+        omlx_bin="${omlx_venv}/bin/omlx"
       elif command -v omlx >/dev/null 2>&1; then
         omlx_bin="omlx"
       else
-        omlx_bin="${model_omlx_venv}/bin/omlx"   # missing: _check_deps reports this path
+        omlx_bin="${omlx_venv}/bin/omlx"   # missing: _check_deps reports this path
       fi
     fi
+    local rev=""
+    rev=$(git -C "$omlx_src_dir" rev-parse --short HEAD 2>/dev/null)
+    omlx_build="${omlx_bin}@${rev:-unknown}"
     omlx_cache_dir="${OMLX_CACHE_DIR:-${HOME}/.omlx/cache}"
-    omlx_ssd_cache_max="${OMLX_SSD_CACHE_MAX:-40GB}"
+    omlx_ssd_cache_max="${OMLX_SSD_CACHE_MAX:-25GB}"
     omlx_cache_prune_gb="${OMLX_CACHE_PRUNE_GB:-${omlx_ssd_cache_max//[!0-9]/}}"
   }
 
-  # ── Model profile ────────────────────────────────────────────────────
-  # model_id must match a model oMLX serves from --model-dir (the two-level
-  # <namespace>/<name> form is accepted) AND the id keyed in opencode.json.
-  # Default: Qwen 3.6 35B-A3B in a flat MLX 6-bit quant (~27.5 GB resident).
-  # The everyday coder — broad context (65 k) and no per-model oMLX settings to
-  # enable; just works on a fresh box.
-  _model_qwen() {
-    model_id="mlx-community/Qwen3.6-35B-A3B-6bit"
-    model_label="Qwen 3.6 35B-A3B 6-bit"
-    model_context_limit=65536
-    model_omlx_venv="${HOME}/.omlx/venv"
+  # ── Model profiles ───────────────────────────────────────────────────
+  # Three models, and no others. Every model_id is the two-level <org>/<repo>
+  # form: it is the directory this launcher symlinks under --model-dir, the id
+  # opencode.json declares, and the id opencode sends. oMLX resolves it to the
+  # directory LEAF (resolve_model_id strips everything before the first "/"), so
+  # the leaf is what ~/.omlx/model_settings.json must be keyed by.
+  #
+  # CAPABILITY IS MEASURED, AND IT INVERTS THE SPEED ORDER. Each model passed a
+  # serve check — finish_reason stop, non-empty content, reasoning split out, a
+  # tool call that parses — which proves only that the model runs. W14 then ran
+  # four multi-turn coding tasks, 3 repeats each, graded by EXECUTING the model's
+  # own output: Muse 9/12 pass@1, GLM 6/12, Bonsai 5/12. The slowest model on the
+  # roster writes the best code and the fastest writes the worst.
+  #
+  # THAT RANKING IS A SHORT-PROMPT RESULT, and it dissolves at the context an
+  # agent turn actually holds. W21 re-ran the three separating tasks at ~17.6k:
+  # 9/6/5 pass@1 becomes 8/6/7, Muse and Bonsai TIE at 8/9 on pass@≤2, and every
+  # remaining gap sits inside the noise band. Bonsai is then the cheapest per
+  # solved task — 2.31 min against Muse's 3.19 — and degrades least with length
+  # (1.12x against Muse's 1.39x and GLM's 1.73x).
+  #
+  # THE DEFAULT IS BONSAI, by the user's decision on 2026-08-14. It is NOT a
+  # measured capability lead: at short prompts Muse still leads 9/12 to 5/12, and
+  # W18's pre-registered floor — a challenger must lead by three — is not met. It
+  # is a choice of the cheapest profile at agentic length and less than half the
+  # resident footprint, taken where the evidence no longer separates the models.
+  # Muse keeps its short-prompt lead one flag away, at --muse.
+  #
+  # Measured on prompts under 4,000 tokens (W14) and at ~17.6k (W21, three tasks,
+  # 9 runs each). Neither measures capability near a full context window.
+  #
+  # The numbers below are measured on this box (M4 Max, 64 GB), not estimated.
+  # "Door charge" is the cold prefill of a ~12.8k-token agentic prompt, paid once
+  # per directory visit; later turns in the same conversation prefill only their
+  # fresh tokens, because the paged cache matches the growing prefix.
+
+  # Opt-in via --glm. GLM 4.7 Flash, a 47-layer MoE (64 routed experts, 4 active
+  # + 1 shared) with MLA attention: 22.89 GB resident, ~590 tok/s prefill (door
+  # charge ~21.8 s), ~68 tok/s decode. It prefills ~3x faster than anything else
+  # here, which is what this profile buys.
+  #
+  # IT WAS THE DEFAULT UNTIL W18, and lost it on measurement. It scored 6/12
+  # pass@1, recovered from a real error message 0 times in 12 runs, and ran to
+  # finish_reason: length on 4 of 12 turns — a runaway spends the whole
+  # 8,192-token budget and returns nothing. This repo's post-edit-check throws
+  # errors back at the model, so a model that cannot act on one is weak exactly
+  # where this box needs it. Its template accepts enable_thinking, so a pin may
+  # cure the runaways and win the default back — that is W19 on the map.
+  #
+  # It carries an MTP head (num_nextn_predict_layers: 1) that stays OFF: nothing
+  # has measured it here, and mtp_enabled is a per-model oMLX setting, not a flag.
+  # Its context is capped well under the native 202,752 window because oMLX sizes
+  # MLA KV with the MHA formula and over-charges this model ~7x — opencode.json
+  # holds the number.
+  _model_glm() {
+    model_id="lmstudio-community/GLM-4.7-Flash-MLX-6bit"
+    model_label="GLM 4.7 Flash 6-bit"
   }
 
-  # Opt-in via -l/--lite: the same A3B model in oMLX's native oQ6 quant
-  # (data-driven mixed precision) with MTP heads preserved (-mtp). MTP
-  # (multi-token prediction / speculative decode) is OFF by default in oMLX and
-  # is enabled per-model via ~/.omlx/model_settings.json — ai.sh writes that key
-  # on launch (see scripts/patch-omlx-mtp.mjs). ~30 GB resident; KV is cheap
-  # (2 KV heads → ~80 KB/token), so the binding limit is the prefill transient
-  # against the Metal working-set cap — 49 k is the empirically safe ceiling
-  # (see opencode.json). Faster decode than the flat 6-bit when MTP engages.
-  _model_lite() {
-    model_id="Jundot/Qwen3.6-35B-A3B-oQ6-mtp"
-    model_label="Qwen 3.6 35B-A3B oQ6 +MTP (lite)"
-    model_context_limit=49152
-    model_omlx_venv="${HOME}/.omlx/venv"
+  # Default, also selectable as --bonsai. Ternary Bonsai 27B, a 2-bit ternary
+  # fine-tune of Qwen3.6-27B by prism-ml: 8.44 GB resident — less than half of
+  # --muse — so it leaves the most room for the hot cache, a summarizer capture
+  # and the OS. It costs prefill: ~194 tok/s, so the door charge on a 12.8k
+  # prompt is 58.6 s against GLM's 21.8 s. Decode ~38 tok/s short, ~12.5 at 17-22k.
+  #
+  # It scored 5/12 pass@1 but 8/12 with one repair turn — the best recovery rate
+  # of the three, so it takes feedback well, which is exactly what this repo's
+  # post-edit-check demands of a model. Its 2-bit quant shows no collapse; its
+  # failures are ordinary mistakes. At ~17.6k it reaches 7/9, ties Muse on
+  # pass@≤2, and costs 2.31 min per solved task against Muse's 3.19 — the
+  # cheapest of the three at agentic length, which is what won it the default.
+  #
+  # It is a VLM with language_model_only: False, so the vision tower loads either
+  # way (~0.90 GB); this launcher serves it as a coding model only. 64 layers run
+  # 3 linear : 1 full attention, so only 16 layers cache KV — but oMLX does not
+  # honour the card's 4-bit KV claim, so KV is fp16 at ~64 KB/token (~4.0 GB at
+  # 65 k). It reaches its full declared window with no warning.
+  _model_bonsai() {
+    model_id="prism-ml/Ternary-Bonsai-27B-mlx-2bit"
+    model_label="Ternary Bonsai 27B 2-bit"
   }
 
-  # Opt-in via -g/--gemma: Gemma 4 12B instruct, QAT base + OptiQ
-  # mixed-precision 4-bit (329 per-layer overrides, not a flat quant). 9 GB on
-  # disk, ~11 GB resident at 65 k — a third of the Qwen default. But it's a
-  # DENSE 12B against Qwen's 35B-A3B MoE (~3B active), so every token reads all
-  # ~9 GB of weights: expect slower decode despite the smaller footprint. KV is
-  # near-free (40 of 48 layers are sliding-window 1024 → ~335 MB fixed; the 8
-  # global layers share one K/V tensor → ~8 KB/token ⇒ ~0.9 GB at 65 k), so the
-  # 65 k cap matches the default for a clean single-variable comparison rather
-  # than tracking any memory limit.
-  _model_gemma() {
-    model_id="mlx-community/gemma-4-12B-it-qat-OptiQ-4bit"
-    model_label="Gemma 4 12B QAT+OptiQ 4-bit"
-    model_context_limit=65536
-    model_omlx_venv="${HOME}/.omlx/venv"
-  }
-
-  # Opt-in via --macaw: Macaw, a 4-bit MLX build of an LFM2.5-2.6B fine-tune from
-  # badtheorylabs. 1.54 GB on disk, ~2 GB resident — an order of magnitude below
-  # every other profile. It runs on the SAME pinned oMLX as the rest: mlx-lm 0.31.3
-  # ships an `lfm2` model module, so no second build is needed.
+  # Opt-in via --muse. Muse Glimmer 30B in a flat 4-bit quant: 18.59 GB resident,
+  # ~190 tok/s prefill (door charge 64.5 s), ~26 tok/s decode short and ~11 at
+  # 17-22k — the slowest decode on the roster. It wastes almost nothing: 9/12
+  # pass@1, 11/12 with one repair, and zero runaways in 12 runs, all at short
+  # prompts. Reach for it when the work is short-prompt and hard.
   #
-  # Architecture is a hybrid: 30 layers, of which only 6 are full_attention and 24
-  # are short convolutions (conv_L_cache 3). KV therefore costs ~12 KB/token from
-  # those 6 layers alone (8 KV heads x 64 head_dim), so ~0.8 GB at 65 k. Native
-  # window is 128 k; the 65 k cap here matches the other profiles for a clean
-  # single-variable comparison, not because memory forces it.
+  # W18 made it the default on that short-prompt lead, and it held that until
+  # 2026-08-14. W21 then found the lead gone at ~17.6k (8/9 against Bonsai's 7/9,
+  # tied on pass@≤2) while the costs stayed: 2.2x the resident footprint and 3.19
+  # min per solved task against 2.31. The door charge is paid once per directory
+  # visit, so the 64.5 s buys a session, but decode never amortises.
   #
-  # Tool calls use LFM2's own syntax, NOT OpenAI JSON:
-  #   <|tool_call_start|>[fn(arg='value')]<|tool_call_end|>
-  # oMLX parses that natively (omlx/api/tool_calling.py), which is why this model
-  # can drive opencode at all. generation_config.json asks for greedy decoding
-  # (do_sample false, repetition_penalty 1.1); opencode.json sets
-  # "temperature": false so oMLX falls back to exactly that recipe.
-  #
-  # KNOW WHAT THIS IS. Macaw is a macOS desktop-assistant fine-tune — its model
-  # card advertises 97 macOS tools, email, PDFs and battery status. It is ~2.6B
-  # parameters against the Qwen default's 35B-A3B. Expect it to be very fast and
-  # much weaker at software engineering. It earns its place on latency, not skill.
-  _model_macaw() {
-    model_id="badtheorylabs/Macaw-4bit-MLX"
-    model_label="Macaw 4-bit (LFM2.5-2.6B)"
-    model_context_limit=65536
-    model_omlx_venv="${HOME}/.omlx/venv"
+  # A VLM whose perception encoder is ~3.63 GB of the download; served as a coding
+  # model only. Its KV is the cheapest of the three — 3 sliding : 1 full attention
+  # at a 2048 window means only 13 of 52 layers cache KV (~13 KB/token, ~1.0 GB at
+  # 65 k), so it writes nothing to the SSD tier at these sizes. The same 13 layers
+  # are the only ones that see the whole window, so long-range recall is weaker
+  # than 52 layers suggests. Native window 131,072 — the shortest here.
+  _model_muse() {
+    model_id="mlx-community/Muse-Glimmer-30B-4bit"
+    model_label="Muse Glimmer 30B 4-bit"
   }
 
   local oc_provider="mlx"
@@ -198,8 +251,8 @@ ai() {
 
   # Warn if another opencode session is already serving a *different* local model.
   # oMLX is multi-model and lazy-loads whatever model id a request asks for, so a
-  # lingering opencode from a previous `ai`/`ai -l` run keeps requesting its
-  # model — and oMLX loads it alongside ours. Two ~20-28GB LLMs can't coexist
+  # lingering opencode from a previous `ai`/`ai --glm` run keeps requesting its
+  # model — and oMLX loads it alongside ours. Two ~19-23GB LLMs can't coexist
   # under the memory guard, so it thrashes (evict/reload) and stalls or 507s
   # requests mid-turn (the agent "chokes"). Restarting our server can't stop the
   # other client, so we can only detect the conflict and tell the user to clear
@@ -291,94 +344,101 @@ ai() {
     printf "  ${c_bold}Usage:${c_reset}  ai.sh [OPTIONS] [-- frontend-args...]\n"
     echo ""
     printf "  ${c_bold}Options:${c_reset}\n"
-    printf "    ${c_cyan}-l,     --lite${c_reset}        Use the oQ6 +MTP quant ${c_dim}(speculative decode, 49k ctx, no MCPs)${c_reset}\n"
-    printf "    ${c_cyan}-g,     --gemma${c_reset}       Use Gemma 4 12B QAT+OptiQ 4-bit ${c_dim}(dense 12B, ~11 GB resident, 65k ctx)${c_reset}\n"
-    printf "    ${c_cyan}        --macaw${c_reset}       Use Macaw 4-bit ${c_dim}(LFM2.5-2.6B, 1.5 GB, fast; desktop-assistant tune)${c_reset}\n"
-    printf "    ${c_cyan}--no-hybrid${c_reset}          Disable the cloud-Claude ${c_bold}@advisor${c_reset} subagent ${c_dim}(on by default)${c_reset}\n"
-    printf "    ${c_cyan}-k,     --kill${c_reset}       Kill the oMLX server\n"
-    printf "    ${c_cyan}-h,     --help${c_reset}       Show this help\n"
+    printf "    ${c_cyan}        --bonsai${c_reset}      Use Ternary Bonsai 27B 2-bit ${c_dim}(the default, named)${c_reset}\n"
+    printf "    ${c_cyan}        --muse${c_reset}        Use Muse Glimmer 30B 4-bit ${c_dim}(18.6 GB resident — the short-prompt one)${c_reset}\n"
+    printf "    ${c_cyan}        --glm${c_reset}         Use GLM 4.7 Flash 6-bit ${c_dim}(22.9 GB resident — the fast one)${c_reset}\n"
+    printf "    ${c_cyan}-k,     --kill${c_reset}        Kill the oMLX server\n"
+    printf "    ${c_cyan}-h,     --help${c_reset}        Show this help\n"
     echo ""
-    printf "  ${c_bold}Model:${c_reset}\n"
-    printf "    ${c_dim}Qwen 3.6 35B-A3B 6-bit (local, default)${c_reset}\n"
-    printf "    ${c_dim}Qwen 3.6 35B-A3B oQ6 +MTP (local, via -l)${c_reset}\n"
-    printf "    ${c_dim}Gemma 4 12B QAT+OptiQ 4-bit (local, via -g)${c_reset}\n"
-    printf "    ${c_dim}Macaw 4-bit LFM2.5-2.6B (local, via --macaw)${c_reset}\n"
+    printf "  ${c_bold}Models${c_reset} ${c_dim}(measured on this box; door charge = cold prefill of a 12.8k prompt)${c_reset}\n"
+    printf "    ${c_bold}ai${c_reset}           Ternary Bonsai 27B 2-bit   ${c_dim} 8.4 GB · door 58.6s · 38 tok/s · 5/12${c_reset}\n"
+    printf "    ${c_bold}ai --muse${c_reset}    Muse Glimmer 30B 4-bit     ${c_dim}18.6 GB · door 64.5s · 26 tok/s · 9/12${c_reset}\n"
+    printf "    ${c_bold}ai --glm${c_reset}     GLM 4.7 Flash 6-bit        ${c_dim}22.9 GB · door 21.8s · 68 tok/s · 6/12${c_reset}\n"
+    echo ""
+    printf "    ${c_dim}Last column is pass@1 over 12 real coding runs at SHORT prompts (W14).${c_reset}\n"
+    printf "    ${c_dim}At ~17.6k the spread is 7 / 9 / 6 and the models stop separating (W21),${c_reset}\n"
+    printf "    ${c_dim}so the default is the cheapest per solved task there and the smallest.${c_reset}\n"
+    printf "    ${c_dim}Weights come from LM Studio's store; ai.sh never downloads a model.${c_reset}\n"
     echo ""
   }
 
+  # ── Retired model flags ──────────────────────────────────────────────
+  # A stale `ai -l` in shell history must FAIL, never remap in silence. The old
+  # flags and the new roster share no model, so a quiet substitution would run a
+  # whole session on a model the user did not choose.
+  _retired_flag() {
+    local flag="$1" gone="$2"
+    _err "Retired flag ${c_bold}${flag}${c_reset} — ${gone} is no longer served"
+    _info "The roster is now:"
+    _info "  ${c_bold}ai${c_reset}            Ternary Bonsai 27B 2-bit"
+    _info "  ${c_bold}ai --muse${c_reset}     Muse Glimmer 30B 4-bit"
+    _info "  ${c_bold}ai --glm${c_reset}      GLM 4.7 Flash 6-bit"
+  }
+
   # ── Ensure the selected model is on disk ─────────────────────────────
-  # oMLX lazily loads weights from --model-dir on the first request, so a model
-  # that isn't downloaded yet would only fail at that point. We pull it eagerly
-  # here (before the server starts) following the existing layout: download into
-  # the HF cache, then symlink the snapshot into ~/.omlx/models/mlx-community/<name>
-  # (matching how the 35B is exposed). Idempotent — a no-op once the weights exist.
+  # ONE COPY OF EVERY WEIGHT FILE. LM Studio owns the store — the user downloads
+  # models by hand there — and oMLX reaches the same bytes through a directory
+  # symlink under --model-dir. This launcher therefore NEVER downloads: a missing
+  # model fails loudly by repo id instead of quietly writing a second 8-23 GB copy.
+  #
+  # The symlink is not what makes a model visible: oMLX also scans the HF cache on
+  # its own (huggingface.hf_cache_enabled). The link makes --model-dir
+  # authoritative — discovery reads it first, so the linked copy wins the duplicate
+  # tie-break — and it gives this function a path to verify. Do NOT repoint
+  # OMLX_MODEL_DIR at the store instead: that strands bge-m3, which lives under
+  # --model-dir and is served from the same process.
+  #
+  # Idempotent: a correct link is a silent no-op.
   _ensure_model() {
+    local store="${hf_hub_dir}/${model_id}"
     local target="${omlx_model_dir}/${model_id}"
-    if [[ -e "$target" ]] && compgen -G "${target}/*.safetensors" >/dev/null 2>&1; then
-      return 0
-    fi
 
-    # Resolve a Hugging Face downloader — prefer the oMLX venv's, then PATH.
-    local hf_bin=""
-    for cand in \
-      "$(dirname "$omlx_bin")/hf" \
-      "$(dirname "$omlx_bin")/huggingface-cli" \
-      "$(command -v hf 2>/dev/null)" \
-      "$(command -v huggingface-cli 2>/dev/null)"; do
-      if [[ -n "$cand" && -x "$cand" ]]; then hf_bin="$cand"; break; fi
-    done
-    if [[ -z "$hf_bin" ]]; then
-      _err "No Hugging Face downloader (hf/huggingface-cli) found"
-      _info "Expected in the oMLX venv: ${c_dim}${HOME}/.omlx/venv/bin/hf${c_reset}"
+    if [[ ! -d "$store" ]] || ! compgen -G "${store}/*.safetensors" >/dev/null 2>&1; then
+      _err "Model missing from the LM Studio store: ${c_bold}${model_id}${c_reset}"
+      _info "Expected weights in ${c_dim}${store}${c_reset}"
+      _info "Download it in LM Studio, then run ${c_dim}ai${c_reset} again. This launcher never downloads."
       return 1
     fi
 
-    echo ""
-    _box_top
-    _box_line " ${c_bold}Downloading model${c_reset}"
-    _box_mid
-    _box_line " ${c_dim}${model_id}${c_reset}"
-    _box_line " ${c_dim}one-time download (9–30 GB depending on model) — progress below${c_reset}"
-    _box_bottom
-    echo ""
-
-    # hf prints the resolved snapshot path to stdout as a "path=<dir>" line (hf 1.x;
-    # older CLIs print a bare path). HF_XET_HIGH_PERFORMANCE enables the fast Xet
-    # transfer backend (the old HF_HUB_ENABLE_HF_TRANSFER is deprecated in 1.x).
-    # NOTE: the Xet backend also writes progress lines ("Fetching N files",
-    # "Download complete") to *stdout*, and they can TRAIL the path= line — so a
-    # naive `tail -1` grabs a progress line instead of the path (and tqdm uses \r,
-    # not \n, between updates). We capture stdout (letting per-file progress on
-    # stderr through to the terminal), split on \r, and pull the path= line. If
-    # that yields nothing usable we fall back to resolving the snapshot straight
-    # from the HF cache layout (refs/main → snapshots/<rev>), which is immune to
-    # any output-format drift. Capturing without a pipe also lets `||` see hf's
-    # real exit status (a piped `| tail` would mask a download failure).
-    local raw
-    raw=$(HF_XET_HIGH_PERFORMANCE=1 "$hf_bin" download "$model_id") || {
-      _err "Download failed for ${model_id}"
-      return 1
-    }
-    local snapshot
-    snapshot=$(printf '%s' "$raw" | tr '\r' '\n' | sed -n 's/^path=//p' | tail -1)
-    [[ -n "$snapshot" && -d "$snapshot" ]] || snapshot=$(printf '%s' "$raw" | tr '\r' '\n' | grep -v '=' | tail -1)
-    if [[ -z "$snapshot" || ! -d "$snapshot" ]]; then
-      # Fallback: deterministic HF cache layout. hf stores repo <ns>/<name> at
-      # <hub>/models--<ns>--<name>/snapshots/<rev>, with refs/main holding <rev>.
-      local hub="${HF_HUB_CACHE:-${HF_HOME:-${HOME}/.cache/huggingface}/hub}"
-      local repo_dir="${hub}/models--${model_id//\//--}"
-      local rev=""
-      [[ -f "${repo_dir}/refs/main" ]] && IFS= read -r rev < "${repo_dir}/refs/main"
-      [[ -n "$rev" ]] && snapshot="${repo_dir}/snapshots/${rev}"
-    fi
-    if [[ -z "$snapshot" || ! -d "$snapshot" ]]; then
-      _err "Download did not yield a snapshot directory"
+    # A half-fetched model must fail exactly like an absent one. The shards that
+    # did land would otherwise load as a truncated model — a far worse failure,
+    # because oMLX reports it as a model error rather than a missing download.
+    if compgen -G "${store}/downloading_*" >/dev/null 2>&1 || compgen -G "${store}/*.part" >/dev/null 2>&1; then
+      _err "Model still downloading: ${c_bold}${model_id}${c_reset}"
+      _info "LM Studio is still fetching shards into ${c_dim}${store}${c_reset}"
       return 1
     fi
 
-    mkdir -p "$(dirname "$target")"
-    ln -sfn "$snapshot" "$target"
-    _ok "Model ready ${c_dim}(${target})${c_reset}"
+    # A real directory here is a second copy of the weights — the one thing this
+    # design exists to prevent. Report it; never overwrite it.
+    if [[ -e "$target" && ! -L "$target" ]]; then
+      _err "A real directory sits where the symlink belongs: ${c_dim}${target}${c_reset}"
+      _info "That is a second copy of the weights. Remove it, then run ${c_dim}ai${c_reset} again."
+      return 1
+    fi
+
+    [[ "$(readlink "$target" 2>/dev/null)" == "$store" ]] && return 0
+
+    mkdir -p "$(dirname "$target")" || return 1
+    ln -sfn "$store" "$target" || return 1
+    _ok "Weights linked ${c_dim}${target} → ${store}${c_reset}"
+  }
+
+  # ── Drop model symlinks whose weights are gone ───────────────────────
+  # Removing a model from LM Studio's store leaves its link behind. oMLX skips a
+  # dangling link in silence, so this is tidiness rather than correctness — it
+  # keeps --model-dir an honest list of what this box can serve. Only broken links
+  # are removed, and a broken link holds no data.
+  _prune_stale_model_links() {
+    [[ -d "$omlx_model_dir" ]] || return 0
+    local link removed=0
+    while IFS= read -r link; do
+      [[ -n "$link" ]] || continue
+      [[ -e "$link" ]] && continue                       # target resolves — keep it
+      rm -f "$link" && removed=$(( removed + 1 ))
+    done < <(find "$omlx_model_dir" -mindepth 1 -maxdepth 2 -type l 2>/dev/null)
+    (( removed > 0 )) && _info "Removed ${removed} dangling model symlink(s) ${c_dim}(weights no longer in the store)${c_reset}"
+    return 0
   }
 
   # ── Prune the paged SSD KV cache to the cap ────────────────────────────
@@ -432,7 +492,17 @@ ai() {
     # oMLX discovers models from --model-dir subdirectories; opencode picks the
     # model per request, so we don't pass --model. The paged SSD cache + hot
     # RAM tier are what collapse agentic time-to-first-token from ~30s to ~1s.
-    "$omlx_bin" serve \
+    # nohup + disown, not a bare `&`. Without them the server stays a child of
+    # the launching shell and inside its job table, so it dies with that shell —
+    # closing the terminal you typed `ai` in takes the server down with it, and
+    # a model load is 3-9 s plus a cold door charge to get back. Seen twice on
+    # 2026-08-13: a graceful shutdown mid-session with nothing in the log but
+    # "Engine pool shutdown", which reads exactly like a crash and is not one.
+    # macOS has no setsid, so this is as detached as it gets: nohup ignores
+    # SIGHUP, disown drops it from the shell's jobs. A signal aimed at the whole
+    # process group would still reach it — _kill_server is the supported way to
+    # stop it.
+    nohup "$omlx_bin" serve \
       --model-dir "$omlx_model_dir" \
       --port "$server_port" \
       --paged-ssd-cache-dir "$omlx_cache_dir" \
@@ -443,6 +513,9 @@ ai() {
       --log-level info \
       >"$server_log" 2>&1 &
     local server_pid=$!
+    # $! is still the server: nohup execs in place rather than forking, so the
+    # pid file and _wait_for_server's `kill -0` check both stay correct.
+    disown "$server_pid" 2>/dev/null || true
     echo "$server_pid" > "$pid_file"
 
     _wait_for_server "$server_pid" "$server_log"
@@ -476,10 +549,11 @@ ai() {
       if _server_healthy; then
         printf "\r                                                    \r"
         _ok "Server ready ${c_dim}(PID ${server_pid}, took ${elapsed}s)${c_reset}"
-        # Line 1: served model id. Line 2: the oMLX binary serving it. Recorded
-        # so a same-model/different-binary case still forces a restart — every
-        # profile shares one build today, but OMLX_BIN can point elsewhere.
-        printf "%s\n%s\n" "$model_id" "$omlx_bin" > "$state_file"
+        # Line 1: served model id. Line 2: the build serving it (binary path plus
+        # the source checkout's commit). Recorded so a same-model/different-build
+        # case still forces a restart — an in-place oMLX upgrade keeps the binary
+        # path identical, so the commit is the half that actually moves.
+        printf "%s\n%s\n" "$model_id" "$omlx_build" > "$state_file"
         trap - INT
         return 0
       fi
@@ -497,6 +571,102 @@ ai() {
     _err "Check log: ${server_log}"
     trap - INT
     return 1
+  }
+
+  # ── Warm the prompt prefix ─────────────────────────────────────────────
+  # opencode puts the system prompt, AGENTS.md, the skill list and every tool
+  # definition BEFORE your message. Measured in this repo: 13,364 tokens for a
+  # message as short as "hi". Muse prefills that in 88.2 s cold and 7.4 s warm,
+  # so the wait is a door charge on a prefix that changes only when the date,
+  # the directory or the config changes — not once per message. Every number in
+  # this block was measured on Muse Glimmer, which was the default when the
+  # warm-up was written; it is --muse now, and nothing here was re-measured on
+  # Bonsai. The mechanism is the same on every profile; the seconds are not.
+  #
+  # This sends that prefix through `opencode run` with max_tokens pinned to 1,
+  # in the caller's directory, on the same model. opencode therefore builds the
+  # prompt exactly as the real session will, and oMLX holds the blocks before
+  # you finish typing. It decodes nothing.
+  #
+  # Nothing here is fatal. A warm-up that fails costs only the door charge you
+  # already pay today, so every step is best-effort and silent.
+  #
+  # IT IS WORTHLESS UNLESS THE SYSTEM PROMPT IS BYTE-STABLE, which is measured,
+  # not feared. opencode scans three skill directories, dedupes by NAME and
+  # races them for the tie-break, so the <location> line of a duplicated skill
+  # changes between launches. Three identical `opencode run` invocations in one
+  # directory produced THREE different system prompts, diverging at token
+  # ~4,400; a warm-up under those conditions reused 4,096 of 13,469 tokens and
+  # saved 1.1 s of 101.3 s. With one scan directory the same three runs hash
+  # identically. That is why ~/.agents/skills is now the single source and why
+  # the launch below sets OPENCODE_DISABLE_CLAUDE_CODE_SKILLS — if a future
+  # opencode adds a fourth scan path, this warm-up silently stops paying, and
+  # the symptom is a cold first turn rather than an error.
+  #
+  # OFF BY DEFAULT, because a real launch measured it losing. On a cold server
+  # the warm-up and the first real turn CONTEND: oMLX has no request priority
+  # (`omlx serve` exposes only --max-concurrent-requests), so a warm-up cannot
+  # yield, and prefill on one GPU serialises. One launch logged the warm-up
+  # holding the device for 50.62 s while the user's turn — submitted 10 s after
+  # the server came up — waited behind it, turning a ~90 s first answer into
+  # 2 m 14 s. The warm-up only pays if you launch `ai` and then do not type for
+  # a minute. Set AI_WARM_PREFIX=1 if that is your habit.
+  #
+  # MCP now stays ON in the warm-up, and the reason is worth keeping. Muse's
+  # template renders a compact "// Tool metadata" NAME LIST before the full
+  # schemas, so dropping the MCP tools diverges the prefix a few hundred tokens
+  # into the tool section rather than late — measured at reused=6,144 of 13,324.
+  # An MCP-less warm-up therefore prefilled 11,907 tokens to save 6,144, and the
+  # box did 43 % more total work than with no warm-up at all. AI_WARM_PREFIX_MCP=0
+  # restores that behaviour and is kept only to reproduce the measurement.
+  _warm_prefix() {
+    (( warm_prefix )) || return 0
+    command -v node >/dev/null 2>&1 || return 0
+
+    # max_tokens goes under the MODEL's options, not the provider's: opencode
+    # spreads a model's options object verbatim into the request body, while the
+    # provider's options configure the SDK client (baseURL, apiKey, timeouts).
+    # The title agent is disabled here too, so a warm-up never spends a second
+    # request — and a second batch slot — naming a session you will never open.
+    local warm_cfg=""
+    warm_cfg=$(node -e '
+const base = process.argv[1] ? JSON.parse(process.argv[1]) : {};
+base.$schema = "https://opencode.ai/config.json";
+base.provider = base.provider || {};
+base.provider.mlx = base.provider.mlx || {};
+base.provider.mlx.models = base.provider.mlx.models || {};
+const models = base.provider.mlx.models;
+models[process.argv[2]] = models[process.argv[2]] || {};
+models[process.argv[2]].options = Object.assign({}, models[process.argv[2]].options, { max_tokens: 1 });
+base.agent = base.agent || {};
+base.agent.title = Object.assign({}, base.agent.title, { disable: true });
+if (process.argv[3] !== "1") {
+  const cfg = JSON.parse(require("fs").readFileSync(process.argv[4], "utf8"));
+  const m = Object.assign({}, base.mcp);
+  for (const k of Object.keys(cfg.mcp || {})) m[k] = Object.assign({}, m[k], { enabled: false });
+  base.mcp = m;
+}
+process.stdout.write(JSON.stringify(base));
+' "$oc_config_content" "$model_id" "$warm_mcp" "${ai_dir}/opencode.json" 2>/dev/null)
+    [[ -n "$warm_cfg" ]] || return 0
+
+    # OPENCODE_MEM_EXCLUDE_DIRS=/ makes the patched opencode-mem skip this run
+    # for capture AND recall. Capture is the point: the summarizer is a raw
+    # client that never sees max_tokens above, so an uncapped 99 s summary of a
+    # one-word warm-up would outlive the warm-up itself. Skipping recall costs
+    # nothing, because the plugin unshifts recalled memories onto the USER
+    # message, which sits after the whole shared prefix.
+    # Every variable that shapes the prompt must match the real launch below, or
+    # the warm-up caches a prefix the session never asks for.
+    ( OPENCODE_CONFIG_CONTENT="$warm_cfg" \
+      OPENCODE_DISABLE_CLAUDE_CODE_SKILLS=1 \
+      OPENCODE_MEM_EXCLUDE_DIRS="/" \
+      OPENCODE_MEM_MODEL="$model_id" \
+      opencode run --dir "$caller_dir" -m "${oc_provider}/${oc_model}" \
+        --title "ai.sh prefix warm-up" "warm" \
+        >"$warm_log" 2>&1 ) &
+    disown 2>/dev/null
+    _info "Warming the prompt prefix in the background ${c_dim}(~13k tokens; AI_WARM_PREFIX=0 to skip)${c_reset}"
   }
 
   # ── Reap orphaned MCP children from prior sessions ───────────────────
@@ -536,13 +706,10 @@ ai() {
       missing=1
     fi
     if [[ ! -x "$omlx_bin" ]] && ! command -v omlx >/dev/null 2>&1; then
-      # Name the venv this profile expects and its matching source checkout.
-      local src_dir="${HOME}/.omlx/src"
-      [[ "$model_omlx_venv" == *"-next" ]] && src_dir="${HOME}/.omlx/src-next"
       _err "Missing dependency: ${c_bold}omlx${c_reset} (expected at ${c_dim}${omlx_bin}${c_reset})"
-      _info "Build: ${c_dim}git clone https://github.com/jundot/omlx ${src_dir} \\"
-      _info "  && uv venv ${model_omlx_venv} --python 3.12 \\"
-      _info "  && VIRTUAL_ENV=${model_omlx_venv} uv pip install -e ${src_dir}${c_reset}"
+      _info "Build: ${c_dim}git clone https://github.com/jundot/omlx ${omlx_src_dir} \\"
+      _info "  && uv venv ${omlx_venv} --python 3.12 \\"
+      _info "  && VIRTUAL_ENV=${omlx_venv} uv pip install -e ${omlx_src_dir}${c_reset}"
       missing=1
     fi
     return $missing
@@ -550,8 +717,11 @@ ai() {
 
   # ── Main logic ───────────────────────────────────────────────────────
   local action=""               # "" | "kill" | "help"
-  local profile="default"       # "default" (35B-A3B 6-bit) | "lite" (35B-A3B oQ6 +MTP) | "gemma" (Gemma 4 12B QAT+OptiQ) | "macaw" (Macaw 4-bit LFM2.5-2.6B)
-  local hybrid=1                # cloud-Claude @advisor subagent ON by default; disable with --no-hybrid
+  # "" means no model flag was given, so bare `ai` takes the default. The default
+  # is named "bonsai" below rather than tracked as the string "default": the GLM
+  # fail-safe further down keys on the profile NAME, and a sentinel that moves
+  # with the default would silently point it at the wrong model.
+  local profile=""              # "" (default) | "glm" | "bonsai" | "muse"
   local -a passthrough_args=()
 
   while [[ $# -gt 0 ]]; do
@@ -564,42 +734,60 @@ ai() {
         action="help"
         shift
         ;;
-      -l|--lite)
-        if [[ "$profile" != "default" && "$profile" != "lite" ]]; then
+      --glm|-glm)
+        # Model flags are mutually exclusive — picking the wrong one silently
+        # costs a server restart and a fresh model load, so fail loudly.
+        if [[ -n "$profile" && "$profile" != "glm" ]]; then
           _err "Conflicting model flags: --${profile} and $1"
           _show_help
           return 1
         fi
-        profile="lite"
+        profile="glm"
         shift
+        ;;
+      --bonsai|-bonsai)
+        # Names the default explicitly. Bare `ai` lands on the same model, so
+        # this flag documents an intent rather than changing one.
+        if [[ -n "$profile" && "$profile" != "bonsai" ]]; then
+          _err "Conflicting model flags: --${profile} and $1"
+          _show_help
+          return 1
+        fi
+        profile="bonsai"
+        shift
+        ;;
+      --muse|-muse)
+        # Muse Glimmer was the default until 2026-08-14. The flag already existed
+        # then and named the same model, so an existing habit or script keeps
+        # working across the move, and keeps reading correctly.
+        if [[ -n "$profile" && "$profile" != "muse" ]]; then
+          _err "Conflicting model flags: --${profile} and $1"
+          _show_help
+          return 1
+        fi
+        profile="muse"
+        shift
+        ;;
+      -l|--lite)
+        _retired_flag "$1" "Qwen 3.6 35B-A3B oQ6 +MTP"
+        return 1
         ;;
       -g|--gemma|-gemma)
-        # Model flags are mutually exclusive — picking the wrong one silently
-        # costs a multi-GB download or a server restart, so fail loudly.
-        if [[ "$profile" != "default" && "$profile" != "gemma" ]]; then
-          _err "Conflicting model flags: --${profile} and $1"
-          _show_help
-          return 1
-        fi
-        profile="gemma"
-        shift
+        _retired_flag "$1" "Gemma 4 12B QAT+OptiQ 4-bit"
+        return 1
         ;;
       --macaw|-macaw)
-        if [[ "$profile" != "default" && "$profile" != "macaw" ]]; then
-          _err "Conflicting model flags: --${profile} and $1"
-          _show_help
-          return 1
-        fi
-        profile="macaw"
-        shift
+        _retired_flag "$1" "Macaw 4-bit (LFM2.5-2.6B)"
+        return 1
         ;;
-      -hybrid|--hybrid)
-        hybrid=1
-        shift
-        ;;
-      --no-hybrid|-no-hybrid)
-        hybrid=0
-        shift
+      -hybrid|--hybrid|--no-hybrid|-no-hybrid)
+        # The @advisor cloud subagent is gone, so both halves of the switch are
+        # retired together. Neither is silently accepted: --no-hybrid would now
+        # be a no-op that reads like a guarantee, and -hybrid would promise a
+        # cloud path this launcher can no longer open.
+        _err "Retired flag ${c_bold}$1${c_reset} — the ${c_bold}@advisor${c_reset} cloud subagent is removed"
+        _info "No launch has a path off this box. ${c_dim}Nothing to enable or disable.${c_reset}"
+        return 1
         ;;
       --)
         shift
@@ -616,10 +804,9 @@ ai() {
 
   # ── Select model profile (local default) ─────────────────────────────
   case "$profile" in
-    lite)  _model_lite ;;
-    gemma) _model_gemma ;;
-    macaw) _model_macaw ;;
-    *)     _model_qwen ;;
+    glm)  _model_glm ;;
+    muse) _model_muse ;;
+    *)    _model_bonsai ;;   # "" (bare `ai`) and "bonsai" both land here
   esac
   _resolve_runtime
   local oc_model="$model_id"
@@ -633,22 +820,81 @@ ai() {
 
   _reap_orphan_mcps
 
-  # Pull the selected model eagerly so the server never lazy-fails on a
-  # missing download (a first `ai` fetches the 6-bit default; a first `ai -l`
-  # fetches the oQ6-mtp weights; a first `ai -g` fetches Gemma 4 12B; a first
-  # `ai --macaw` fetches the 1.5 GB Macaw weights).
+  # Verify the selected model's weights and link them under --model-dir, so the
+  # server never lazy-fails on the first request. This never downloads: LM Studio
+  # owns the store and the user fetches models there by hand.
+  _prune_stale_model_links
   _ensure_model || return 1
 
-  # Enable per-model oMLX settings that aren't server CLI flags: MTP
-  # (multi-token prediction) for the oQ6-mtp (`-l`) build, thinking-off for
-  # and thinking-off for Gemma (`-g`). These live in
-  # ~/.omlx/model_settings.json, which oMLX reads at model
-  # load — so a running server must be restarted to pick up a change (the
-  # model-switch restart below handles the common case). Idempotent merge: it
+  # Apply per-model oMLX settings that aren't server CLI flags. They live in
+  # ~/.omlx/model_settings.json, which oMLX reads at model load — so a running
+  # server must be restarted to pick up a change (the model-switch restart below
+  # handles the common case). The current roster pins NOTHING: all three models
+  # pass their serve check at their own defaults, and MTP stays off. The call
+  # stays because the mechanism is where any future pin lands, and because it
+  # re-asserts our settings over an oMLX admin-panel toggle. Idempotent merge: it
   # only writes when a value differs, and never clobbers other models/keys.
   local omlx_base_dir="${OMLX_BASE_DIR:-${HOME}/.omlx}"
   if command -v node >/dev/null 2>&1 && [[ -f "${ai_dir}/scripts/patch-omlx-mtp.mjs" ]]; then
     node "${ai_dir}/scripts/patch-omlx-mtp.mjs" "${omlx_base_dir}/model_settings.json" >/dev/null 2>&1
+  fi
+
+  # Correct oMLX's MLA KV estimate before the server starts. Unpatched, oMLX sizes
+  # GLM 4.7 Flash's KV with the uniform MHA formula and charges ~362 KB/token against
+  # a real 52.9 — a 7.08x over-count that puts 65,536 context out of reach and
+  # throttles the prefill chunk from ~25k tokens up. The patch is one loop in one
+  # function, and it cannot reach the other two models: the estimator returns early
+  # unless the config carries BOTH kv_lora_rank and qk_rope_head_dim, which only GLM
+  # does. See .wayfinder/model-roster-swap tickets W5 and W12.
+  #
+  # oMLX is an editable install, so the source IS what runs — but only from the next
+  # server start, because a live process already imported the old module. Appending
+  # to omlx_build makes the state-file build check below restart a stale server on
+  # its own, instead of leaving it answering with the old arithmetic.
+  local mla_patch_ok=0
+  if command -v node >/dev/null 2>&1 && [[ -f "${ai_dir}/scripts/patch-omlx-mla-kv.mjs" ]]; then
+    if node "${ai_dir}/scripts/patch-omlx-mla-kv.mjs" "$omlx_src_dir" >/dev/null 2>&1; then
+      mla_patch_ok=1
+      omlx_build="${omlx_build}+mlakv"
+    fi
+  fi
+
+  # Harden Muse Glimmer's output parser, same mechanism, different model.
+  # Muse frames messages as `<|start|>assistant to=<name><|message|>BODY`, and
+  # oMLX SUPPRESSES a body whose recipient is neither self nor user, parsing the
+  # tool call only at finalize. Every defect below follows from that: when the
+  # parse fails the tokens are already gone, and the client gets an empty answer
+  # with finish_reason=stop, which opencode reads as "no tool call" and leaves
+  # the agent loop over. Four fixes — a corrupt invoke name (`bash<|message|>`),
+  # a stray <|message|> that leaks the tool XML to the user, a header scan that
+  # disagreed with the splitter and silently dropped whole turns, and a rail
+  # that surfaces the raw text rather than answer nothing at all. One model
+  # only: this adapter is selected for muse_glimmer alone.
+  # The build suffix carries a version, so a server running the older patch
+  # restarts instead of looking current.
+  local muse_tc_patch_ok=0
+  if command -v node >/dev/null 2>&1 && [[ -f "${ai_dir}/scripts/patch-omlx-muse-toolcall.mjs" ]]; then
+    if node "${ai_dir}/scripts/patch-omlx-muse-toolcall.mjs" "$omlx_src_dir" >/dev/null 2>&1; then
+      muse_tc_patch_ok=1
+      omlx_build="${omlx_build}+musetc5"
+    fi
+  fi
+
+  # Deliver the request's tool list to the VLM lane's output parser. oMLX reads
+  # request.tools when it builds that parser, Request carries the field, and
+  # engine_core.add_request forwards it — but VLMBatchedEngine.chat/stream_chat
+  # hold `tools` as an explicit parameter and never pass it on, so it is always
+  # None here. That makes the dotted-name repair above DEAD CODE: it rewrites
+  # `webfetch.webfetch` to `webfetch` only when it can prove the prefix is a
+  # real tool, and with no tool list it can prove nothing. It also strips the
+  # schemas from parameter coercion. Muse Glimmer and Bonsai both ride this
+  # lane; GLM does not.
+  local vlm_tools_patch_ok=0
+  if command -v node >/dev/null 2>&1 && [[ -f "${ai_dir}/scripts/patch-omlx-vlm-tools.mjs" ]]; then
+    if node "${ai_dir}/scripts/patch-omlx-vlm-tools.mjs" "$omlx_src_dir" >/dev/null 2>&1; then
+      vlm_tools_patch_ok=1
+      omlx_build="${omlx_build}+vlmtools2"
+    fi
   fi
 
   # ── Server management ──────────────────────────────────────────────
@@ -657,22 +903,23 @@ ai() {
 
   if [[ -n "$running_pid" ]]; then
     if _server_healthy; then
-      local running_model="" running_bin=""
+      local running_model="" running_build=""
       if [[ -f "$state_file" ]]; then
-        { IFS= read -r running_model; IFS= read -r running_bin; } < "$state_file" 2>/dev/null
+        { IFS= read -r running_model; IFS= read -r running_build; } < "$state_file" 2>/dev/null
       fi
       if [[ "$running_model" != "$model_id" ]]; then
         _warn "Server running with different model (${running_model:-unknown})"
         _info "Switching to ${c_bold}${model_label}${c_reset}"
         _kill_server
         _start_server || return 1
-      elif [[ "$running_bin" != "$omlx_bin" ]]; then
-        # Same model, different oMLX build — or a state file written before the
-        # binary was recorded, where we cannot tell. Restart either way: the
-        # profiles now run oMLX versions 2190 commits apart, and guessing wrong
-        # means serving a model the running build does not implement.
-        _warn "Server running from a different oMLX build (${running_bin:-unrecorded})"
-        _info "Restarting on ${c_dim}${omlx_bin}${c_reset}"
+      elif [[ "$running_build" != "$omlx_build" ]]; then
+        # Same model, a different oMLX build — or a state file written before the
+        # build was recorded this way, where we cannot tell. Restart either way:
+        # an in-place upgrade leaves a running server on the old code, which is
+        # invisible from the outside and diverges from the model settings and
+        # architecture support the new build brought in.
+        _warn "Server running from a different oMLX build (${running_build:-unrecorded})"
+        _info "Restarting on ${c_dim}${omlx_build}${c_reset}"
         _kill_server
         _start_server || return 1
       else
@@ -693,17 +940,22 @@ ai() {
   _warn_model_conflict
 
   # ── MCP / RAG ──────────────────────────────────────────────────────
-  # Lite runs MCP-free. opencode deep-merges OPENCODE_CONFIG_CONTENT over the
+  # The MCP kill-switch. opencode deep-merges OPENCODE_CONFIG_CONTENT over the
   # global opencode.json (later wins), so emitting {enabled:false} for every MCP
   # server declared there disables them all for this session only — no edit to
   # opencode.json, and new servers added later are covered automatically. Passed
   # to the opencode launch below; an empty value is ignored by opencode.
+  #
+  # NO PROFILE CLAIMS THIS TODAY. The retired `-l` owned it; the machinery stays
+  # because it costs nothing while idle and is one assignment away from being
+  # live, should a profile on the new roster want to run MCP-free.
+  local mcp_free=0
   local oc_config_content=""
-  if [[ "$profile" == "lite" ]]; then
+  if (( mcp_free )); then
     if command -v node >/dev/null 2>&1 && [[ -f "${ai_dir}/opencode.json" ]]; then
       oc_config_content=$(node -e 'const fs=require("fs");const c=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));const m={};for(const k of Object.keys(c.mcp||{}))m[k]={enabled:false};process.stdout.write(JSON.stringify({$schema:"https://opencode.ai/config.json",mcp:m}));' "${ai_dir}/opencode.json" 2>/dev/null)
     fi
-    _info "MCPs disabled ${c_dim}(lite — no smart-coding RAG / chrome-devtools)${c_reset}"
+    _info "MCPs disabled for this session ${c_dim}(no smart-coding RAG / chrome-devtools)${c_reset}"
   else
     # opencode.json points smart-coding at a private, repo-owned copy of
     # smart-coding-mcp (so we never mutate a shared global package). Its embedder
@@ -745,6 +997,71 @@ ai() {
     fi
   fi
 
+  # Fail-safe for the MLA KV patch above. If its anchor is gone — an oMLX upgrade
+  # moved the code — oMLX charges GLM 362 KB/token again and rejects every prompt
+  # past ~20k mid-session, while opencode.json still advertises 65,536. Rather than
+  # meet that one failed turn at a time, advertise the measured-safe mid-session cap
+  # for THIS SESSION ONLY, through the same OPENCODE_CONFIG_CONTENT overlay the MCP
+  # kill-switch uses (opencode deep-merges it last, so it wins). 24,576 is chosen
+  # from W5's measurements: 20,450 tokens answered even at 36 GB in use, and ~37,500
+  # was rejected mid-session, so the safe point sits between them.
+  #
+  # Only the GLM profile needs this. Bonsai and Muse never reach the patched code
+  # and hold a flat 65,536 (W13). The max_context_window rail in model_settings.json
+  # reads 36,864 for GLM (W12) — one 4,096-token block above its declared 32,768. It
+  # is a belt for clients that never read opencode.json at all, not the binding cap,
+  # and it does NOT fall back with this overlay: a degraded session advertises 24,576
+  # to opencode while the rail stays at 36,864, which is the safe way round.
+  # Warn when Muse loses its tool-call hardening. There is no rail to raise here:
+  # the failure mode is a wasted turn, not a wrong answer, so the session is told
+  # rather than capped. Keyed on the MODEL, not the profile. Muse Glimmer serves
+  # only --muse today, but it served bare `ai` as well until 2026-08-14, and a
+  # test on the flag would have missed half its sessions then — the trap W18
+  # caught on the GLM fail-safe. Keying on the model id survives the next move of
+  # the default; keying on the profile name has to be revisited at every move.
+  if (( ! muse_tc_patch_ok )) && [[ "$model_id" == *Muse-Glimmer* ]]; then
+    _warn "oMLX Muse output-parser patch did not apply — the upgrade moved the code"
+    _info "Tool calls may be rejected as unknown tools, or a turn may end with no answer at all ${c_dim}(re-anchor scripts/patch-omlx-muse-toolcall.mjs)${c_reset}"
+  fi
+
+  # Keyed on the VLM lane, not on one model: Bonsai loses the same repair. GLM
+  # rides the batched lane and is unaffected, so it is not warned.
+  if (( ! vlm_tools_patch_ok )) && [[ "$model_id" == *Muse-Glimmer* || "$model_id" == *Ternary-Bonsai* ]]; then
+    _warn "oMLX VLM tool-list patch did not apply — the upgrade moved the code"
+    _info "The output parser cannot see the tool list, so the dotted-name repair is inert ${c_dim}(re-anchor scripts/patch-omlx-vlm-tools.mjs)${c_reset}"
+  fi
+
+  local glm_degraded_context=24576
+  if (( ! mla_patch_ok )) && [[ "$profile" == "glm" ]]; then
+    if command -v node >/dev/null 2>&1; then
+      local degraded=""
+      degraded=$(node -e '
+const base = process.argv[1] ? JSON.parse(process.argv[1]) : {};
+base.$schema = "https://opencode.ai/config.json";
+base.provider = base.provider || {};
+base.provider.mlx = base.provider.mlx || {};
+base.provider.mlx.models = base.provider.mlx.models || {};
+const models = base.provider.mlx.models;
+models[process.argv[2]] = models[process.argv[2]] || {};
+const m = models[process.argv[2]];
+m.limit = m.limit || {};
+m.limit.context = Number(process.argv[3]);
+process.stdout.write(JSON.stringify(base));
+' "$oc_config_content" "$model_id" "$glm_degraded_context" 2>/dev/null)
+      [[ -n "$degraded" ]] && oc_config_content="$degraded"
+    fi
+    _warn "oMLX MLA KV patch did not apply — the upgrade moved the code"
+    _info "Context capped at ${c_bold}${glm_degraded_context}${c_reset} for this session ${c_dim}(re-anchor scripts/patch-omlx-mla-kv.mjs)${c_reset}"
+  fi
+
+  # Fire the warm-up here, not at the launch below: everything that follows —
+  # the memory check, the plugin symlinks, the stale-file cleanup — runs while
+  # oMLX prefills, and that is lead time the first message does not have to pay
+  # for.
+  # It reads the final $oc_config_content, so a degraded GLM session warms the
+  # same prefix it will then use.
+  _warm_prefix
+
   # ── Memory check (opencode-mem plugin) ─────────────────────────────
   # Persistent cross-session memory: auto-capture summarizer + embeddings run
   # on the local oMLX server, SQLite at ~/.opencode-mem.
@@ -769,7 +1086,8 @@ ai() {
         node "${ai_dir}/scripts/patch-opencode-mem-exclude.mjs" "$mem_pkg" >/dev/null 2>&1
       # Model override: let OPENCODE_MEM_MODEL (set at launch to the session model)
       # steer the summarizer, so it reuses the already-loaded model instead of pulling
-      # in the default 35B alongside a -m/-l session and thrashing the memory guard.
+      # opencode-mem.jsonc's own pick in alongside an opt-in profile and thrashing the
+      # memory guard.
       [[ -f "${ai_dir}/scripts/patch-opencode-mem-model.mjs" ]] && \
         node "${ai_dir}/scripts/patch-opencode-mem-model.mjs" "$mem_pkg" >/dev/null 2>&1
     done
@@ -787,7 +1105,7 @@ ai() {
   # Deterministic enforcement: opencode's tool.execute.after hook runs ESLint +
   # tsc + Prettier after every edit and *throws* remaining errors back into the
   # agent loop, so the model can't leave broken code behind (prompt-level rules
-  # get skipped, especially by the local 35B model). opencode auto-loads any file
+  # get skipped, especially by a local model). opencode auto-loads any file
   # in ~/.config/opencode/plugins/ at startup (note: directory is plural — the
   # singular "plugin" key in opencode.json is the npm-package array, a different
   # thing). We keep the global symlink current (idempotent — re-pointed on every
@@ -806,62 +1124,21 @@ ai() {
     _warn "post-edit-check plugin missing — lint/typecheck not enforced"
   fi
 
-  # ── Hybrid cloud advisor (on by default; --no-hybrid to disable) ───────────
-  # A read-only, prompt-only cloud-Claude subagent the local model never auto-
-  # calls — you summon it by hand with @advisor (see agents/advisor.md). It is
-  # enabled by default (default/-l/-m); --no-hybrid turns it off.
-  # Three independent privacy controls:
-  #   1. GATING — the agent file is symlinked in ONLY when hybrid is active;
-  #      otherwise it is removed, so a --no-hybrid launch has no
-  #      agent referencing the anthropic provider and thus no egress path at all.
-  #      We remove it on every non-hybrid launch so a stale symlink can't silently
-  #      re-open the cloud path.
-  #   2. MANUAL — opencode.json sets permission.task:"ask", so even if the local
-  #      model tries to delegate to the advisor, opencode prompts before anything
-  #      leaves the box. The advisor is mode:subagent (never the primary).
-  #   3. PROMPT-ONLY — advisor.md denies every tool, so the advisor can only reason
-  #      about the text you hand it; it can't open files to widen the egress.
-  # Every advisor call is recorded by plugins/advisor-egress-log.js to
-  # logs/advisor-egress.jsonl (named .jsonl so the logs/*.log prune can't delete
-  # the audit trail). The advisor runs on REAL cloud Claude via opencode's built-in
-  # anthropic provider + your `opencode auth login` OAuth.
-  local advisor_src="${ai_dir}/agents/advisor.md"
-  local advisor_dst="${HOME}/.config/opencode/agents/advisor.md"
-  local egress_src="${ai_dir}/plugins/advisor-egress-log.js"
-  local egress_dst="${HOME}/.config/opencode/plugins/advisor-egress-log.js"
-  local advisor_egress_log=""
-  if [[ "$hybrid" == "1" ]]; then
-    if [[ -f "$advisor_src" && -f "$egress_src" ]]; then
-      mkdir -p "${HOME}/.config/opencode/agents" "${HOME}/.config/opencode/plugins" "$ai_log_dir"
-      ln -sf "$advisor_src" "$advisor_dst"
-      ln -sf "$egress_src" "$egress_dst"
-      advisor_egress_log="${ai_log_dir}/advisor-egress.jsonl"
-      # OAuth preflight — warn (don't block) if Anthropic isn't logged in; the
-      # advisor will just error until `opencode auth login` is run once.
-      if ! grep -q '"anthropic"' "${HOME}/.local/share/opencode/auth.json" 2>/dev/null; then
-        _warn "Anthropic OAuth not found — @advisor will fail until you log in"
-        _info "Run once: ${c_dim}opencode auth login${c_reset} → Anthropic (uses your Claude plan, no API key)"
-      fi
-      _ok "@advisor enabled ${c_dim}(cloud Opus, manual + prompt-only; egress → ${advisor_egress_log})${c_reset}"
-    else
-      _warn "-hybrid requested but advisor files missing — advisor not enabled"
-      rm -f "$advisor_dst" "$egress_dst" 2>/dev/null
-    fi
-  else
-    # Airgap guarantee: ensure no advisor/egress plumbing lingers from a prior
-    # -hybrid run, so a plain `ai` provably has no path to the cloud.
-    rm -f "$advisor_dst" "$egress_dst" 2>/dev/null
-  fi
-
-  # Clean up scraps from the removed AFK experiment (agents, loop plugin and the
-  # /lock command), so a stale symlink or leftover file can never re-introduce an
-  # auto-driving agent into a normal session. Safe on every launch.
+  # Clean up scraps from removed experiments — the AFK agents, its loop plugin
+  # and the /lock command, plus the withdrawn @advisor cloud subagent and its
+  # egress logger. A stale symlink or leftover file must never re-introduce an
+  # auto-driving agent, or a path off this box, into a normal session. Safe on
+  # every launch, and the only thing standing between an old install and a
+  # resurrected cloud path: opencode auto-loads whatever sits in these
+  # directories at startup, so removing the repo copy alone is not enough.
   rm -f "${HOME}/.config/opencode/agents/afk.md" \
         "${HOME}/.config/opencode/agents/afk-impl.md" \
         "${HOME}/.config/opencode/agents/afk-planner.md" \
         "${HOME}/.config/opencode/agents/afk-cagetest.md" \
         "${HOME}/.config/opencode/agents/grill.md" \
+        "${HOME}/.config/opencode/agents/advisor.md" \
         "${HOME}/.config/opencode/plugins/afk-loop.js" \
+        "${HOME}/.config/opencode/plugins/advisor-egress-log.js" \
         "${HOME}/.config/opencode/command/lock.md" \
         "${HOME}/.config/opencode/command/afk.md" \
         "${HOME}/.config/opencode/command/afk-issue.md" 2>/dev/null
@@ -872,22 +1149,30 @@ ai() {
 
   _info "Launching ${c_bold}opencode${c_reset} with ${c_bold}${oc_provider}/${oc_model}${c_reset}"
   echo ""
-  # ADVISOR_EGRESS_LOG is empty unless -hybrid enabled the advisor; the egress-log
-  # plugin (only symlinked under -hybrid) reads it to record what's sent to @advisor.
   # OPENCODE_MEM_EXCLUDE_DIRS: never capture/recall memory from these trees. Prepend
   # sensitive client-repo roots via ai.env; read by the patched opencode-mem
   # (patch-opencode-mem-exclude.mjs).
   # OPENCODE_MEM_MODEL points the opencode-mem summarizer at the SAME model this
   # session runs (read by the patched config.js), so auto-capture never loads a second
-  # ~20-28GB model alongside -l and thrashes the memory guard into a 507 loop.
-  # OPENCODE_CONFIG_CONTENT is an inline config opencode deep-merges last; under -l it
-  # carries {enabled:false} for every MCP server (built above), and is empty otherwise
-  # (empty = ignored by opencode, so the default keeps its MCPs).
+  # 8-23GB model beside it and thrashes the memory guard into a 507 loop.
+  # OPENCODE_CONFIG_CONTENT is an inline config opencode deep-merges last; it carries
+  # {enabled:false} for every MCP server when the kill-switch above is set, and is
+  # empty otherwise (empty = ignored by opencode, so a session keeps its MCPs).
+  #
+  # OPENCODE_DISABLE_CLAUDE_CODE_SKILLS keeps the system prompt BYTE-STABLE between
+  # launches, which is what lets oMLX's paged cache match a prefix at all. opencode
+  # scans ~/.claude/skills, ~/.agents/skills and ~/.config/opencode/skills, dedupes
+  # by name, and races the directories for the tie-break — three identical runs in
+  # one directory produced three different prompts, diverging at token ~4,400 on
+  # nothing but a <location> line. ~/.agents/skills is now the single source (the
+  # other two held only symlinks into it), so this variable retires the last
+  # duplicate scan. It is opencode-only: Claude Code reads ~/.claude/skills itself
+  # and is untouched. No skill is lost — measured at 29 before and after.
   #
   # The explicit `-m mlx/<id>` is what makes `ai` local regardless of opencode.json's
   # default model (now a Vercel AI Gateway model, for bare `opencode` sessions): the
-  # CLI flag wins over the config, so every ai/-l/-g launch pins its own local model.
-  ADVISOR_EGRESS_LOG="$advisor_egress_log" \
+  # CLI flag wins over the config, so every profile pins its own local model.
+  OPENCODE_DISABLE_CLAUDE_CODE_SKILLS=1 \
   OPENCODE_MEM_EXCLUDE_DIRS="${OPENCODE_MEM_EXCLUDE_DIRS:-}" \
   OPENCODE_MEM_MODEL="$model_id" \
   OPENCODE_CONFIG_CONTENT="$oc_config_content" \

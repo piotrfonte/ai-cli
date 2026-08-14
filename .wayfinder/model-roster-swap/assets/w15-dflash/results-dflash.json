@@ -1,0 +1,107 @@
+{
+  "tag": "dflash",
+  "nonce": "w15-dflash-1786563485",
+  "model": "mlx-community/Muse-Glimmer-30B-4bit",
+  "max_tokens": 8192,
+  "gate": {
+    "seconds": 21.89,
+    "finish_reason": "stop",
+    "content": "```python\nimport re\n\ndef slugify(s):\n    s = s.lower()\n    s = re.sub(r'[^a-z0-9]+', '-', s)\n    return s.strip('-')\n```",
+    "reasoning_chars": 1797,
+    "prompt_tokens": 83,
+    "completion_tokens": 473,
+    "cached_tokens": 0,
+    "passed": true
+  },
+  "short_prefill": {
+    "seconds": 0.621,
+    "finish_reason": "stop",
+    "content": "to",
+    "reasoning_chars": 0,
+    "prompt_tokens": 83,
+    "completion_tokens": 1,
+    "cached_tokens": 0
+  },
+  "decode": [
+    {
+      "seconds": 21.15,
+      "finish_reason": "stop",
+      "content": "```python\nimport re\n\ndef slugify(s):\n    s = s.lower()\n    s = re.sub(r'[^a-z0-9]+', '-', s)\n    return s.strip('-')\n```",
+      "reasoning_chars": 1797,
+      "prompt_tokens": 83,
+      "completion_tokens": 473,
+      "cached_tokens": 0,
+      "decode_seconds": 20.529,
+      "tok_per_s": 23.04
+    },
+    {
+      "seconds": 21.478,
+      "finish_reason": "stop",
+      "content": "```python\nimport re\n\ndef slugify(s):\n    s = s.lower()\n    s = re.sub(r'[^a-z0-9]+', '-', s)\n    return s.strip('-')\n```",
+      "reasoning_chars": 1797,
+      "prompt_tokens": 83,
+      "completion_tokens": 473,
+      "cached_tokens": 0,
+      "decode_seconds": 20.857,
+      "tok_per_s": 22.68
+    },
+    {
+      "seconds": 21.449,
+      "finish_reason": "stop",
+      "content": "```python\nimport re\n\ndef slugify(s):\n    s = s.lower()\n    s = re.sub(r'[^a-z0-9]+', '-', s)\n    return s.strip('-')\n```",
+      "reasoning_chars": 1797,
+      "prompt_tokens": 83,
+      "completion_tokens": 473,
+      "cached_tokens": 0,
+      "decode_seconds": 20.828,
+      "tok_per_s": 22.71
+    }
+  ],
+  "cold_prefill": {
+    "seconds": 75.587,
+    "finish_reason": "stop",
+    "content": "to",
+    "reasoning_chars": 0,
+    "prompt_tokens": 12190,
+    "completion_tokens": 1,
+    "cached_tokens": 0
+  },
+  "warm_repeat": {
+    "seconds": 86.601,
+    "finish_reason": "stop",
+    "content": "to",
+    "reasoning_chars": 0,
+    "prompt_tokens": 12190,
+    "completion_tokens": 1,
+    "cached_tokens": 0
+  },
+  "concurrency": {
+    "wall_seconds": 51.345,
+    "requests": [
+      {
+        "seconds": 25.235,
+        "finish_reason": "stop",
+        "content": "```python\nimport re\n\ndef slugify(s):\n    s = s.lower()\n    s = re.sub(r'[^a-z0-9]+', '-', s)\n    return s.strip('-')\n```",
+        "reasoning_chars": 1797,
+        "prompt_tokens": 83,
+        "completion_tokens": 473,
+        "cached_tokens": 0
+      },
+      {
+        "seconds": 51.344,
+        "finish_reason": "stop",
+        "content": "```python\nimport re\n\ndef slugify(s):\n    s = s.lower()\n    s = re.sub(r'[^a-z0-9]+', '-', s)\n    return s.strip('-')\n```",
+        "reasoning_chars": 1797,
+        "prompt_tokens": 83,
+        "completion_tokens": 473,
+        "cached_tokens": 0
+      }
+    ]
+  },
+  "admin_activity": {
+    "error": "HTTPError: HTTP Error 401: Unauthorized"
+  },
+  "admin_stats": {
+    "error": "HTTPError: HTTP Error 401: Unauthorized"
+  }
+}
