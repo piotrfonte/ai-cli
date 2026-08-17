@@ -11,7 +11,7 @@
 // so the scheduler's `if not hasattr(self.model, "make_cache")` branch leaves
 // cache_list_for_tq at None (scheduler.py:11580), and the estimator returns None at
 // its `if cache_list is None` check — before reaching any layer counting. The caller
-// then falls back to the uniform MHA formula. Measured (.wayfinder W5): oMLX charges
+// then falls back to the uniform MHA formula. Measured (.scratch W5): oMLX charges
 // 47 x 20 heads x 102 head_dim x 2 x 2 B = ~374 KB/token against a real
 // 47 x (512 + 64) x 2 B = 52.9 KB/token — a 7.08x over-count. The prefill guard then
 // rejects a 65,536-token prompt in 5.1 s with the model alone in memory, and the
@@ -99,7 +99,7 @@ const TO = `    if cache_list is None:
         # (no layer_types, no sliding_window), so num_hidden_layers IS the
         # main-cache count. index_head_dim is carried so a DSA-style model landing
         # here over-counts rather than under-counts; GLM 4.7 Flash has none.
-        # See .wayfinder/model-roster-swap tickets W5 and W12.
+        # See .scratch/model-roster-swap tickets W5 and W12.
         _layers = _cfg_get(config, "num_hidden_layers") or _cfg_get(config, "n_layer")
         if not _pos_int(_layers):
             return None

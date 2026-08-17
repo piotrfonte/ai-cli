@@ -971,7 +971,7 @@ process.stdout.write(JSON.stringify(base));
   # throttles the prefill chunk from ~25k tokens up. The patch is one loop in one
   # function, and it cannot reach the other two models: the estimator returns early
   # unless the config carries BOTH kv_lora_rank and qk_rope_head_dim, which only GLM
-  # does. See .wayfinder/model-roster-swap tickets W5 and W12.
+  # does. See .scratch/model-roster-swap tickets W5 and W12.
   #
   # oMLX is an editable install, so the source IS what runs — but only from the next
   # server start, because a live process already imported the old module. Appending

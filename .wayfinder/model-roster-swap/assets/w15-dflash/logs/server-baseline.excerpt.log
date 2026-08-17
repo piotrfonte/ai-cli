@@ -1,7 +1,0 @@
-2026-08-12 21:33:27,369 - omlx.engine.vlm - INFO - Vision feature cache enabled (SSD: /Users/p/.omlx/cache/vision_features)
-2026-08-12 21:33:27,916 - omlx.memory_monitor - INFO - MemoryMonitor initialized (estimator-only, eviction disabled)
-2026-08-12 21:33:27,916 - omlx.memory_monitor - INFO - Model info set: 52 layers (13 KVCache, rotating 39x@2048), 2 KV heads, 32 Q heads, 128 head_dim. Estimated memory per 64-token block: 3.25 MB
-2026-08-12 21:33:28,185 - omlx.engine.vlm - INFO - VLMBatchedEngine loaded: /Users/p/.omlx/models/mlx-community/Muse-Glimmer-30B-4bit
-2026-08-12 21:33:28,188 - omlx.engine_pool - INFO - Loaded model: Muse-Glimmer-30B-4bit (actual: 18.62GB, estimated: 18.99GB, total: 18.99GB)
-2026-08-12 21:33:28,189 - omlx.engine.vlm - INFO - Structured output requires xgrammar. Install with: pip install 'omlx[grammar]'
-2026-08-12 21:36:24,336 - omlx.engine.vlm - INFO - VLMBatchedEngine stopped

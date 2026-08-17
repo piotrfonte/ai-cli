@@ -244,7 +244,7 @@ const V1_NAME = `        for invoke in _INVOKE_RE.finditer(body):
             # unknown tool. A real tool name never contains "<", so truncating
             # there is lossless for well-formed output and recovers the name
             # from malformed output. Tightening the regex instead would drop the
-            # call outright. See .wayfinder/model-roster-swap ticket W22.
+            # call outright. See .scratch/model-roster-swap ticket W22.
             name = invoke.group(1).split("<", 1)[0].strip()
 `;
 
@@ -284,7 +284,7 @@ const TO_NAME = `        for invoke in _INVOKE_RE.finditer(body):
             # first "." is a declared tool, that segment is the tool. A
             # well-formed name never reaches the branch, and neither does a tool
             # genuinely named with a dot, because that name is known.
-            # See .wayfinder/model-roster-swap ticket W22.
+            # See .scratch/model-roster-swap ticket W22.
             name = invoke.group(1).split("<", 1)[0].strip()
             if known and name not in known and "." in name:
                 head_name = name.split(".", 1)[0]

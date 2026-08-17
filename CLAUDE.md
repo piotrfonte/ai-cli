@@ -47,7 +47,7 @@ an arm proves nothing about its end; that banner is the only reason the charger 
 caught at all. And neither check sees a **Time Machine backup**, which cost W8 a 4.9-hour arm
 while `pmset` and oMLX's own log both read healthy — the single signal was the client clock
 reading 7.10× the server clock. Gate a measurement on
-`.wayfinder/qwen-profile/assets/w8-capability-short/check-contamination.py`.
+`.scratch/qwen-profile/assets/w8-capability-short/check-contamination.py`.
 
 ## Usage
 
@@ -469,7 +469,7 @@ proves a tool call *parses*, at a short prompt, with one simple tool. That is no
 proving tool calls survive an agent turn. And **a wasted turn is invisible in a rate** — read
 `min/solved`, not `tok/s`.
 
-Assets at `.wayfinder/model-roster-swap/assets/w22-muse-toolcall/`: `parser-regress.py` is the
+Assets at `.scratch/model-roster-swap/assets/w22-muse-toolcall/`: `parser-regress.py` is the
 full suite (no server, no model, milliseconds), `parser-repro.py` the byte-exact original
 symptom, `replay-step9.py` the live replay of the dead turn from opencode's own session store.
 
@@ -852,7 +852,7 @@ real.
 **Reported, not patched**, because the repo already carries one oMLX source patch and the
 `max_context_window` rail already turns the five-minute abort into an instant HTTP 400. The
 written report is at
-`.wayfinder/model-roster-swap/assets/w17-prefill-headroom/upstream-report.md`.
+`.scratch/model-roster-swap/assets/w17-prefill-headroom/upstream-report.md`.
 
 ## The weight-sharing contract
 
@@ -1064,7 +1064,7 @@ short-prompt figures: at ~17.6k this roster's rankings have inverted before.
 47 at `low` and 17 at `medium` — and 17 with no kwarg sent, once the pin is written. That is the
 whole proof, and it is worth running after an oMLX upgrade: W5 found `tools` silently dropped on
 this same VLM lane, and a blind setting looks identical to a working one in every log. The probe
-is `pin-arrival.py` in `.wayfinder/qwen-profile/assets/w12-reasoning-cap/`.
+is `pin-arrival.py` in `.scratch/qwen-profile/assets/w12-reasoning-cap/`.
 
 ### Serve-check gate
 
@@ -1104,7 +1104,7 @@ unset writes `vlm_mtp_enabled: false` explicitly, because `patch-omlx-mtp.mjs` n
 key. **No speed has been measured** — acceptance runs 64–85 % at 2.29–2.71 tokens per round, and
 `tokens_per_round` is an **upper bound on** a speedup, not a speedup: each round costs a drafter
 forward plus a target verify. The decision rule and the arm harness are at
-`.wayfinder/perf-headroom/tickets/02-native-mtp-qwen.md`.
+`.scratch/perf-headroom/tickets/02-native-mtp-qwen.md`.
 
 Three facts to carry if you touch this:
 
@@ -1147,12 +1147,12 @@ edits with:
 - `node --check plugins/<file>.js` / `node --check scripts/<file>.mjs`.
 - `python3 -m json.tool opencode.json >/dev/null` — validate the config JSON.
 - **Prove the parser can see the tool list**:
-  `~/.omlx/venv/bin/python .wayfinder/model-roster-swap/assets/w22-muse-toolcall/tools-reach-parser.py`
+  `~/.omlx/venv/bin/python .scratch/model-roster-swap/assets/w22-muse-toolcall/tools-reach-parser.py`
   (and `--stream`). Needs a running server. Reads a string-typed parameter holding digits: it
   stays `"5"` only when the schema arrived. **Run both paths** — they reach `add_request` through
   different engine entry points, and one was fixed while the other stayed blind.
 - **Unit-test the Muse parser patch**:
-  `~/.omlx/venv/bin/python .wayfinder/model-roster-swap/assets/w22-muse-toolcall/parser-regress.py`
+  `~/.omlx/venv/bin/python .scratch/model-roster-swap/assets/w22-muse-toolcall/parser-regress.py`
   — every defect the patch repairs plus the well-formed cases it must not touch, against the
   installed adapter. No server, no model, milliseconds. Run it after any edit to
   `patch-omlx-muse-toolcall.mjs`, and after an oMLX upgrade. Use the oMLX venv interpreter; the
@@ -1161,7 +1161,7 @@ edits with:
   against a throwaway path, then assert the merge — fresh-create, idempotent re-run (no
   rewrite), a pre-existing model preserved, recovery from a corrupt file. No oMLX needed.
 - **Prove a model still has a load path, after every oMLX upgrade**:
-  `~/.omlx/venv/bin/python .wayfinder/qwen-profile/assets/w1-load-path/load-path-probe.py <dir>`.
+  `~/.omlx/venv/bin/python .scratch/qwen-profile/assets/w1-load-path/load-path-probe.py <dir>`.
   It walks the same steps `mlx_vlm.utils.load` walks and stops before `load_weights`, so it
   **needs no weights** — it reads the ~27 MB of metadata beside the shards. It exists because
   **Qwen3.8 and Bonsai fail processor loading differently under stock transformers** — a
@@ -1183,7 +1183,7 @@ edits with:
   working one in every log; `prompt_tokens` on a fixed prompt is the only signal — 17 at `medium`
   against 59 unpinned.
   ```bash
-  python3 .wayfinder/qwen-profile/assets/w12-reasoning-cap/pin-arrival.py \
+  python3 .scratch/qwen-profile/assets/w12-reasoning-cap/pin-arrival.py \
     --base http://127.0.0.1:10081/v1 --mode settings --expect medium
   ```
   **Both flags are required and the default `--base` is dead.** `--mode` has no default, and
@@ -1359,7 +1359,7 @@ Three patches make that safe, all re-applied on every launch:
 **Measured, not open.** W20 measured a capture overlapping a coding turn — the capability suite
 had run with the summarizer deliberately unreachable, so nothing on the map had. The numbers and
 the settings they justify are above; the method is at
-`.wayfinder/model-roster-swap/assets/w20-summarizer/`.
+`.scratch/model-roster-swap/assets/w20-summarizer/`.
 
 ### Post-edit checks — `post-edit-check` plugin (`plugins/post-edit-check.js`)
 
@@ -1663,8 +1663,12 @@ those snapshots destroys backup history and is your call, not the launcher's.
   `/admin/api/activity`, which 401s without a session cookie. **You do not need it for MTP**: the
   ordinary server log carries `vlm_mtp decode started …` and a per-request
   `vlm_mtp stats: … accepted=N/M (P%) tokens_per_round=…` at INFO.
-- **The routes that produced this file** are charted under `.wayfinder/`: the map, one ticket
-  per decision, and the measurement assets under each map's `assets/`. `model-roster-swap/`
+- **The routes that produced this file** are charted under `.scratch/`, which is **gitignored
+  and local to this box** — it is not in the repo, and a clone does not carry it. Every citation
+  below and every validation script this file names resolves only here; the maps were tracked as
+  `.wayfinder/` until 2026-08-17 and stay recoverable from git history at `cd8498d`. Each map
+  holds one ticket per decision and the measurement assets under its own `assets/`.
+  `model-roster-swap/`
   built the three-model roster and moved the default to Bonsai; `qwen-profile/` added `--qwen`
   and priced the 2-bit quant against it. `perf-headroom/` is **open**: W1 built the four native
   Metal kernels and caught a drift larger than the effect it was measuring; **W2 is in progress**

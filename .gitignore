@@ -9,3 +9,4 @@ __pycache__
 # Scratch written by a measurement arm: one absolute path to the server log the
 # arm is reading. It is machine state, not a result, and it changes every run.
 .last-log
+.scratch
