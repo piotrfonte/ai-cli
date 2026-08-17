@@ -89,7 +89,7 @@ def run_once(base_url: str, model: str, prompt: str, max_tokens: int) -> dict:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--base-url", default="http://127.0.0.1:10081/v1")
-    ap.add_argument("--model", default="mlx-community/Qwen3.6-35B-A3B-4bit")
+    ap.add_argument("--model", default="lmstudio-community/GLM-4.7-Flash-MLX-6bit")
     ap.add_argument("--max-tokens", type=int, default=256)
     ap.add_argument(
         "--prompt",
