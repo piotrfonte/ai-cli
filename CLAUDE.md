@@ -23,17 +23,31 @@ Designed for Apple Silicon. Every number in this file was measured on **one M4 M
 64 GB, on AC power with Low Power Mode off**; treat them as properties of this box, not of the
 models.
 
-**Check the power state before you believe any timing.** On battery with Low Power Mode on
-(macOS enables it by itself as the battery runs down), prefill and decode both drop to about
-**40%** of the figures below — measured 2026-08-13: decode 26 → ~10 tok/s, prefill ~190 → ~87
-tok/s, turning a two-round-trip answer into 4m48s. The slowdown is uniform across prefill and
-decode, which is what tells you it is clocks rather than code; a regression in this repo would
-almost never move both by the same factor. Two commands:
+**Check the power state before you believe any timing.** With **Low Power Mode on**, prefill and
+decode both drop to about **40%** of the figures below — measured 2026-08-13: decode 26 → ~10
+tok/s, prefill ~190 → ~87 tok/s, turning a two-round-trip answer into 4m48s. The slowdown is
+uniform across prefill and decode, which is what tells you it is clocks rather than code; a
+regression in this repo would almost never move both by the same factor.
+
+**Low Power Mode is the discriminator. Battery alone is not.** This repo attributed the 40 % to
+"battery with Low Power Mode on" until W9 caught a charger disconnect mid-arm and measured two
+8,192-token generations at matched prompt size across it: **22.7 tok/s on AC, 22.6 on battery**,
+0.4 % apart, with `powermode 0` on both sides. So the two checks below do **not** carry equal
+weight — the first one binds and the second is context. macOS still enables Low Power Mode by
+itself as the battery runs down, which is why running on battery correlates with the penalty
+without causing it.
 
 ```bash
-pmset -g | grep powermode     # 1 = Low Power Mode on
-pmset -g ps                   # 'Battery Power' vs 'AC Power'
+pmset -g | grep powermode     # 1 = Low Power Mode on — this is the one that binds
+pmset -g ps                   # 'Battery Power' vs 'AC Power' — context, not the cause
 ```
+
+**Print the state at both ends of a measurement, never only at the start.** A power check before
+an arm proves nothing about its end; that banner is the only reason the charger disconnect was
+caught at all. And neither check sees a **Time Machine backup**, which cost W8 a 4.9-hour arm
+while `pmset` and oMLX's own log both read healthy — the single signal was the client clock
+reading 7.10× the server clock. Gate a measurement on
+`.wayfinder/qwen-profile/assets/w8-capability-short/check-contamination.py`.
 
 ## Usage
 
@@ -42,6 +56,7 @@ bash ai.sh              # Ternary Bonsai 27B 2-bit — the default
 bash ai.sh --bonsai     # the same model, named explicitly
 bash ai.sh --muse       # Muse Glimmer 30B 4-bit — the short-prompt one
 bash ai.sh --glm        # GLM 4.7 Flash 6-bit — the fast one
+bash ai.sh --qwen       # Qwen3.8 27B 4-bit — the default's 4-bit twin
 bash ai.sh -k           # Kill the local server
 bash ai.sh -h           # Show help
 bash ai.sh -- --flag    # Pass args through to the frontend
@@ -57,45 +72,70 @@ so a silent substitution would run a whole session on a model you did not choose
 
 ## The roster
 
-Three models, and no others. Every model id is the two-level `<org>/<repo>` form — it is the
+Four models, and no others. Every model id is the two-level `<org>/<repo>` form — it is the
 directory `ai.sh` symlinks under `--model-dir`, the id `opencode.json` declares, and the id
 opencode sends.
 
-| Profile | Model | Store | Resident | Door charge | Decode (short / 17–22k) | pass@1 | min/solved | Context |
+| Profile | Model | Store | Resident | Door charge | Decode (short / agentic) | pass@1 | min/solved | Context |
 |---|---|---|---|---|---|---|---|---|
-| `ai` (`--bonsai`) | `prism-ml/Ternary-Bonsai-27B-mlx-2bit` | 7.9 GB | **8.44 GB** | 58.6 s | 38 / ~12.5 tok/s | 5/12 | 4.09 | 65,536 |
-| `--muse` | `mlx-community/Muse-Glimmer-30B-4bit` | 18 GB | 18.59 GB | 64.5 s | 26 / **~11** tok/s | **9/12** | **3.46** | 65,536 |
+| `ai` (`--bonsai`) | `prism-ml/Ternary-Bonsai-27B-mlx-2bit` | 7.9 GB | **8.44 GB** | 58.6 s | 38 / **19–25** tok/s | 5/12 | 4.09 | 65,536 |
+| `--muse` | `mlx-community/Muse-Glimmer-30B-4bit` | 18 GB | 18.59 GB | 64.5 s | 26 / ~11 tok/s | **9/12** | 3.46 | 65,536 |
 | `--glm` | `lmstudio-community/GLM-4.7-Flash-MLX-6bit` | 23 GB | 22.89 GB | **21.8 s** | **68 / ~23** tok/s | 6/12 | 3.83 | 32,768 |
+| `--qwen` | `lmstudio-community/Qwen3.8-27B-MLX-4bit` | 16.05 GB | 15.34 GB | 62.3 s | 20.7 / ~15.8 tok/s | 12/12 · 11/12 † | 1.81 † | 65,536 |
+
+† Measured in a different run from the three rows above, and **not comparable to them**. Read it
+against the same-day Bonsai arm named two paragraphs down.
 
 "Door charge" is the cold prefill of a ~12.8k-token agentic prompt (see Door charge vs
 per-turn prefill). `pass@1` is over 12 real coding runs. `min/solved` is each model's own
 wall-clock divided by the tasks it actually solved.
 
-**Both `pass@1` and `min/solved` are short-prompt numbers, and the default holds the worst of
-each.** That is not an oversight. The ranking they carry does not survive an agentic context,
-where the same suite makes Bonsai the cheapest of the three per solved task — see Why the
-default is Bonsai.
+**The last two columns are short-prompt numbers, and the fourth row is not comparable to the
+first three.** Rows 1–3 come from W14, one suite on one day. `--qwen`'s figures come from W12,
+a different day and a newer build, and they are quoted **with its `reasoning_effort` pin live**
+— which is what it ships with, and which no other model on this roster has. The Bonsai arm run
+**beside** those Qwen arms scored **7/12 at 4.47 min per solved task**, not the 5/12 and 4.09
+this table records. Read `--qwen` against **that** figure, never against the row above it.
+`ai.sh`'s help table prints the lower of the two Qwen arms, 11/12; both are given here.
+
+**The pass@1 ranking does not survive an agentic context.** At ~17.6k the spread across rows
+1–3 is 7 / 8 / 6, every gap inside the noise band, and Bonsai becomes the cheapest of the three
+per solved task — see Why the default is Bonsai. `--qwen` was measured at that length too, in
+its own run against a re-run Bonsai, and it did not separate either: see Qwen3.8 27B 4-bit.
 
 Resident, decode and door charge are **measured**. GLM's door charge is **computed** from its
-measured ~590 tok/s — the direct measurement was 14,909 tokens in 24.93 s.
+measured ~590 tok/s — the direct measurement was 14,909 tokens in 24.93 s. Resident is oMLX's
+own `actual:` figure for every row; on `--qwen` read it as GiB, and never subtract it from a GB
+budget (see that model's section).
 
-**Decode has two numbers, and the agentic one is the one you feel.** Every rate this repo
-quoted before W21 was measured on a short prompt. At a 17–22k context — what an agent turn
-actually holds — **all three models lose about two-thirds of it**. The ranking is unchanged,
-so `--glm` is still the fast profile at any size, but a per-turn estimate built on the short
-number is about **3× too optimistic**. `pass@1` and `min/solved` in this table were both
-computed at ~1.5k prompts; see Capability at agentic context for what happens to them at
-17.6k.
+**Decode has two numbers, and the agentic one is the one you feel — but say which lane and
+which length.** Three cautions, each one measured after an earlier figure here proved wrong:
+
+- **The agentic column is not one method.** Muse's and GLM's `~11` and `~23` are W21's figures
+  and were **never re-measured**; the map that added `--qwen` re-measured only Bonsai and
+  Qwen3.8. Do not read the four cells as one experiment.
+- **Bonsai's agentic rate was recorded as ~12.5 tok/s and does not reproduce.** W4's isolated
+  probe read **25.0 tok/s** at 20k, and W9 read **18.8–20.4 tok/s end-to-end** across ~1.7 hours
+  of real suite — *end-to-end includes prefill*, so that is a **lower bound** on decode. Both sit
+  above the old figure, so the roster's "loses about two-thirds" claim does not hold for Bonsai
+  at this length. Qwen3.8's `~15.8` is a W9 end-to-end figure on the same lane, and its isolated
+  probe read 18.6 at 20k.
+- **oMLX's own `tok/s` means different things on the two lanes** — end-to-end when not
+  streaming, decode-only when streaming. At a 17.7k prompt the same model reads **2.0 or 18.9
+  tok/s on `stream` alone**. Never compare a logged rate across lanes.
+
+What *is* clean is the ratio between two rows measured in one harness on one day: **Bonsai
+decodes 1.71× Qwen3.8 at a short prompt and 1.33× at 20k.**
 
 ### Which profile to use
 
-The table prices the three models. This is the rule for choosing between them.
+The table prices the four models. This is the rule for choosing between them.
 
-**Stay on bare `ai`.** Bonsai is the cheapest of the three per solved task at the context an
-agent turn actually holds — 2.31 min against Muse's 3.19 — it degrades least with length
-(1.12× against Muse's 1.39× and GLM's 1.73×), it takes feedback best (5/12 → 8/12 with one
-repair turn), and at 8.44 GB it leaves the most memory to the hot cache, the summarizer and
-the OS. Switch for one of the two reasons below, and for nothing else.
+**Stay on bare `ai`.** Bonsai is the cheapest of the roster's original three per solved task at
+the context an agent turn actually holds — 2.31 min against Muse's 3.19 — it degrades least with
+length (1.12× against Muse's 1.39× and GLM's 1.73×), it takes feedback best (5/12 → 8/12 with
+one repair turn), and at 8.44 GB it leaves the most memory to the hot cache, the summarizer and
+the OS. Switch for one of the three reasons below, and for nothing else.
 
 **Reach for `--muse` when the prompt is short and the task is hard.** It leads 9/12 to 5/12 on
 the short-prompt suite, it never ran away in 12 runs, and it is the only model that repaired a
@@ -109,27 +149,44 @@ blocks against the others' 2048, so its per-turn re-prefill is near zero. **Do n
 you expect to iterate on.** It never once acted on an error message (0 of 12), and this repo's
 `post-edit-check` throws errors back at the model.
 
+**Reach for `--qwen` when the prompt is short and the task is hard — the same job as `--muse`,
+and the two have never been compared.** Against a same-day Bonsai it leads **+5 on pass@1 and
++4 on pass@≤2** at short prompts (12/12 · 11/12 against 7/12), with **0 runaways in 24 runs**
+and 1.81 min per solved task against 4.47. That lead is far outside this suite's measured band.
+Three things bound it, and none is optional:
+
+- **At agentic length it is indistinguishable from the default.** 15/18 pass@1 against Bonsai's
+  11/18, 18/18 against 13/18 — a lead of +2.0/+2.5 once scaled to the arm the rule was written
+  for, which sits inside the incumbent's own measured 3-verdict instability. This profile's job
+  is a **comparison**, not a capability; do not sell it as one.
+- **It costs 1.82× the resident memory and 0.75× the decode rate**, and it degrades more with
+  length (2.02× against 1.60×). A 500-token answer costs about 28 s against about 20 s.
+- **Its short-prompt figures cannot be read against `--muse`'s 9/12** — different day, different
+  build, no side-by-side arm. See Qwen3.8 27B 4-bit.
+
 Five rules apply to every profile:
 
 - **Pay the door charge once, then stay in the session.** A new directory costs 20–65 s to the
   first token; later turns cost seconds. See Door charge vs per-turn prefill.
 - **Do not switch profile inside a task.** A switch restarts the server and orphans the whole
-  KV cache — one switch logged `skipped_incompatible=399 blocks (5.15 GB)`.
+  KV cache for the outgoing model — those blocks are *dormant*, not dead, and restore in ~3.4 s
+  on the return, but nothing in the switched-to session can use them.
 - **Run one opencode client per model.** A leftover session on another model makes oMLX load
   both, and two large models thrash under the memory guard. See The two-model thrash.
-- **Budget the agentic decode rate, not the short one.** That is ~12.5 tok/s on the default, so
-  a 500-token answer takes about 40 s.
-- **Keep a cold open under ~21,000 tokens on the default, ~22,800 on `--muse`, and under
-  ~32,000 on `--glm`.** Past that you wait more than two minutes for the first token, on every
-  profile — switching profile is not a workaround. See Context windows.
+- **Budget the agentic decode rate, not the short one.** On the default that is 19–25 tok/s, so
+  a 500-token answer takes 20–26 s; on `--qwen` about 28 s; on `--muse` about 45 s.
+- **Keep a cold open under ~21,000 tokens on the default and on `--qwen`, ~22,800 on `--muse`,
+  and under ~32,000 on `--glm`.** Past that you wait more than two minutes for the first token,
+  on every profile — switching profile is not a workaround. See Context windows.
 
-And review Bash by hand on every profile: all three models scored 0/9 first-shot on a real
-`ai.sh`-shaped defect, and `post-edit-check` lints JS/TS only.
+And review Bash by hand on every profile: all three of the models W14 measured scored 0/9
+first-shot on a real `ai.sh`-shaped defect, and `post-edit-check` lints JS/TS only.
 
 **These rules pick on cost, memory and repair behaviour — not on a measured capability lead.**
-At ~17.6k the pass@1 spread is 7 / 8 / 6 in the table's order, and every gap sits inside the
-noise band, so the three models are not separable at the context this repo actually runs. Only
-the short-prompt suite ranks them, and the default comes last on that one.
+At ~17.6k the pass@1 spread across the original three is 7 / 8 / 6, every gap sits inside the
+noise band, and `--qwen`'s own run at that length did not separate it from the default either.
+So **no model on this roster measurably out-codes another at the context this repo runs.** Only
+the short-prompt suite ranks them, and there the default comes last.
 
 ### Why the default is Bonsai
 
@@ -164,14 +221,44 @@ level. The default moved anyway, weighing footprint and cost per solved task at 
 where capability no longer separates. Read W18 and W21 before re-opening this — and re-open it
 with a measurement, not with a preference.
 
+#### It was challenged once, and it held — Qwen3.8, 2026-08-16
+
+`--qwen` exists to price Bonsai's 2-bit quant, and the map that added it fixed the decision rule
+**in writing before any run**: the challenger takes bare `ai` by leading three tasks at ~17.6k;
+on a tie it takes the default only by winning **both** minutes per solved task **and** resident
+footprint.
+
+The rule did not fire. Qwen3.8 led by +2.0/+2.5 once the pooled 18-run result was scaled back to
+the 9-run arm the rule was written for, which is inside Bonsai's own measured 3-verdict
+instability at that length. Capability tied, the tie-break applied, and **it failed on footprint
+alone** — 15.34 GB against 8.44 — though Qwen3.8 *won* the other half at 3.14 min per solved task
+against 3.50. **The default did not move.**
+
+Three things that decision left behind, all of them binding on the next challenger:
+
+- **The default names a model, never a slot.** `--qwen` is a slot the newest Qwen fills. A
+  default living in a slot would follow the slot's next occupant with **no measurement at all** —
+  a model would take bare `ai` by being newer. A slot occupant that ever wins takes the default
+  **as that model**, named in `ai.sh` and here; its replacement re-enters as a challenger.
+- **The next floor must be a rate, not a count.** "Three tasks" is a fixed count, so it silently
+  means "three of nine" to the ticket that wrote it and "three of eighteen" to the run that
+  answered it. One data set evaluated four ways and two of the four fired. State the next floor
+  as a fraction of runs, paired with the band the suite measures at that length.
+- **The reading was a judgement taken after the data.** The other reading of the same clause
+  moves the default. That is recorded rather than smoothed over, because it is the cost of a rule
+  that did not evaluate to one answer.
+
 ### Capability is measured, and it inverts the speed order
 
 A **serve check** proves a model *runs*: `finish_reason: stop`, non-empty `content`, reasoning
 split out, and a tool call that parses. It says nothing about how well the model writes code.
-All three models pass it at their own defaults.
+All four models pass it at their own defaults.
 
 Capability was then measured directly: four multi-turn coding tasks, 3 repeats each, every run
-graded by **executing** the model's own output.
+graded by **executing** the model's own output. The table below is **W14's run, and it does not
+include `--qwen`** — that profile arrived later, was measured on a different day and a newer
+build, and carries a reasoning pin no other model here has. Its figures are in Qwen3.8 27B
+4-bit, beside the same-day Bonsai arm that is their only valid comparison.
 
 | | pass@1 | with one repair turn | Runaways | Recovered from a real error |
 |---|---|---|---|---|
@@ -224,6 +311,29 @@ roster table's 3.46 / 3.83 / 4.09: those come from all four tasks, and dropping 
 where GLM's runaways lived, so the trimmed suite flatters GLM and Bonsai. And 9 runs over 3
 tasks cannot resolve a one-task gap — the honest claim is "indistinguishable", not "equal".
 
+**`--qwen` was measured at the same length, in its own run, and did not separate either.** Same
+three tasks, same prompts, same execution graders, **two arms per model — 18 runs each** — with
+Bonsai re-run beside it on the same day and the same build, because a baseline from another day
+is not a baseline. Every arm passed the contamination check at 1.00×.
+
+| ~17.6k, 18 runs each | Qwen3.8-27B 4-bit (`medium`) | Ternary Bonsai 27B 2-bit |
+|---|---|---|
+| pass@1 | **15/18** | 11/18 |
+| pass@≤2 | **18/18** | 13/18 |
+| Runaways · protocol failures | **0 · 0** | 2 · 2 |
+| min/solved | 3.14 | 3.50 |
+| Degradation, 4k → 17.6k | 2.02× | **1.60×** |
+
+**The whole pooled pass@1 gap is one task.** T1 ties 6/6, T2 ties 4/6, and T4 is 5/6 against
+1/6 — where Bonsai repeats one identical defect in 3 of 6 runs, reporting lint findings for a
+file it was told to exclude. That cuts both ways: a reproducible defect rather than scatter, and
+a single failure mode that one task happens to probe. Three tasks cannot resolve a one-task gap.
+
+Read those 18-run counts beside the band above: **Bonsai's own two arms moved 3 verdicts**, so
+the scaled lead of +2.0/+2.5 sits inside the incumbent's instability. Note also that this run
+compares two **shipping profiles**, not two quantizations — Qwen3.8 has a `reasoning_effort` dial
+and Bonsai has none, so the confound can be chosen but never removed.
+
 **Long-range retrieval is not the weakness.** A separate probe put six unique facts at 2.6 %
 to 95.3 % depth of a ~22k corpus of this repo's own source: **36 of 36**, every model, every
 answer exact. Muse read a needle **21,000 tokens back** as reliably as one 1,050 tokens back,
@@ -236,6 +346,13 @@ which word-splits on the spaces the contract names; Bonsai and Muse both reached
 `find -printf`, which macOS does not have. Only Muse repaired it when shown the failure.
 **`post-edit-check` lints JS/TS only, so nothing in this repo catches a Bash defect a model
 introduces — in the one language the launcher is written in.** Review Bash by hand.
+
+**The noise band is measured, not asserted, and it widens with length.** Running one model's arm
+twice on one day, one hour apart, moves verdicts: **1–2 at 4k** and **3 at ~17.6k** for Bonsai,
+whose min/solved also moved 4.69 → 2.48 between its own two arms. So a three-verdict lead at
+agentic length is the same size as the incumbent's instability, and "real recoveries" cannot
+carry an argument at n=12 — the same metric moved 3 → 1 between two arms of one model. **Run two
+arms, and add the second one before you see the first result**, not after.
 
 ### Muse Glimmer 30B 4-bit — `--muse`
 
@@ -276,7 +393,7 @@ neither `self` nor `user` is **suppressed while streaming** and parsed only at f
 the parse fails, the tokens are already gone: the client gets an empty answer with
 `finish_reason=stop`, opencode reads that as "no tool call" and leaves the agent loop, and the
 session dies with no error anywhere. `scripts/patch-omlx-muse-toolcall.mjs` carries five fixes,
-is idempotent, is re-applied every launch, and appends **`+musetc4`** to the build id so a
+is idempotent, is re-applied every launch, and appends **`+musetc5`** to the build id so a
 server running an older module restarts itself. **The suffix is versioned on purpose** — with a
 flat `+musetc` an older server and a newer source look alike and the launcher leaves the old
 code running. The script also stores the unpatched adapter as
@@ -312,9 +429,9 @@ trip of a three-round-trip, 2m21s answer.
 `scripts/patch-omlx-vlm-tools.mjs` forwards it, marking the build `+vlmtools2`. **Both engine
 entry points needed it**: streaming reaches `add_request` through `stream_generate`, non-streaming
 through `engine_core.generate`. With only the first fixed, `tools-reach-parser.py` passed
-streaming and failed non-streaming — which is why that probe runs both. Bonsai rides the same
-lane and gained the same fix; GLM is on the batched lane and is untouched. It is an upstream
-defect worth reporting: the scheduler reads `request.tools` on every lane.
+streaming and failed non-streaming — which is why that probe runs both. **Bonsai and Qwen3.8
+ride the same lane and gain the same fix**; GLM is on the batched lane and is untouched. It is an
+upstream defect worth reporting: the scheduler reads `request.tools` on every lane.
 
 **A patch whose effect is invisible needs a probe of its own.** Nothing about a blind parser
 shows up in a log; it just quietly stops repairing. The only outside signal is parameter
@@ -383,8 +500,8 @@ It has been the default since 2026-08-14; see Why the default is Bonsai.
 
 **Unlike the default it replaced, it fills the KV cache.** Its KV is fp16 at ~64 KB/token
 against Muse's ~13, so the 8 GB hot tier fills and spills to SSD where Muse's never did. That
-makes `_prune_cache` and the 25 GB disk budget matter more than they did while Muse was the
-default — see `_prune_cache` is load-bearing.
+makes the 25 GB disk budget matter more than it did while Muse was the default — see
+`_prune_cache` is a backstop for one orphan.
 
 It is a VLM with `language_model_only: False`, so the vision tower loads either way (~0.90 GB);
 served here as a coding model only. Its 64 layers run **3 linear : 1 full attention**, so only
@@ -393,14 +510,151 @@ served here as a coding model only. Its 64 layers run **3 linear : 1 full attent
 the card implies. Native window 262,144. It reaches its full declared window with no warning
 of any kind.
 
-Its `mtp_num_hidden_layers: 1` is **empty**: 0 of 2180 tensors carry an MTP head. oMLX detects
-this and skips attachment. Do not write an `mtp_enabled` entry for it, and do not read a flat
-decode rate as MTP failing to engage.
+Its `mtp_num_hidden_layers: 1` is **empty in this artifact**: 0 of 2180 tensors carry an MTP head,
+because the MLX conversion stripped it — the GGUF of the same weights kept it. oMLX detects the
+empty head and skips attachment. Do not write an `mtp_enabled` entry for it, and do not read a
+flat decode rate as MTP failing to engage. **A separate route does reach MTP on this
+architecture**, through an external drafter rather than through this checkpoint; it is live on
+`--qwen` and off here. See Speculative decode.
 
-The one remaining speed lever on the roster is Bonsai's: `omlx.custom_kernels.bonsai` is a
-**decode-only** kernel (`has_native()` is `False` here), so building it under
-`OMLX_WITH_CUSTOM_KERNEL=1` could lift its ~38 tok/s decode. It **cannot** touch its 194 tok/s
-prefill — the prefill kernel already runs its own fastest route (`impl=blocked_seq`).
+**The native Metal kernels are built now, and the paragraph that used to sit here was wrong
+twice.** It said `omlx.custom_kernels.bonsai` was the roster's one remaining speed lever and that
+nothing could touch Bonsai's 194 tok/s prefill, "because the prefill kernel already runs its own
+fastest route (`impl=blocked_seq`)". Measured 2026-08-17:
+
+- **`blocked_seq` is the DEFAULT route, not a proven ceiling.** `qwen35_prefill` exports
+  `gated_delta_chunked_metal` beside it, selected by `OMLX_GDN_IMPL`. Both are MLX JIT kernels
+  and neither needs the native `_ext`, so the alternative was always free to try. It was tried:
+  **`chunked` is 2.7 % slower** at 12.8k. The default stands — now by measurement.
+- **Two OTHER prefill paths were not running at all.** `qwen35_fa256_attention` (head_dim-256
+  causal attention — exactly Bonsai's and Qwen3.8's) and `qwen35_q4_mlp` both require `_ext`,
+  which no `pip install -e` builds. Each failure logs at DEBUG only, so nothing ever showed. Of
+  the four `qwen3_5` fast paths, **three were silently off**.
+
+Built (see Dependencies), all four kernels import and all four patches apply. Isolated with
+`max_tokens=1` and a unique nonce per run, comparing arms at the same cache occupancy: the 12.8k
+door charge falls **86.6 s → 76.4 s (1.13×)** and the 17.6k one **136.3 s → 111.3 s (1.22×)**.
+**Decode does not move** — 18.3 → 19.1 tok/s, inside noise — which is expected: three of the four
+are prefill kernels, and `bonsai`'s decode kernel does not apply to a 4-bit model. Its `qmv_wide`
+route needs **M≥3**, the speculative-**verify** shape, so Bonsai's decode kernel only pays once
+MTP is on.
+
+`ai.sh` records the importable set in the build id (`+kernels4bgmq`), because a rebuild does not
+move the source checkout's git HEAD and a stale server would otherwise look current.
+
+### Qwen3.8 27B 4-bit — `--qwen`
+
+**`--qwen` names a slot, not a model.** The newest Qwen fills it, and a later Qwen replaces this
+model **under the same flag**. It does not get a flag of its own — this roster has moved a model
+under a flag twice already, and each move needed a rule it did not have. **The default is the
+opposite: it names a model.** A default living in a slot would follow the slot's next occupant
+with no measurement at all; a slot occupant that wins the default takes it *as that model*, and
+its replacement re-enters as a challenger.
+
+**Why this profile exists: it prices Bonsai's 2-bit ternary quant, and that is its whole job.**
+Qwen3.8-27B is Bonsai's architecture at 4 bits. Read from both configs and both weight indexes:
+
+| | Ternary Bonsai (the default) | Qwen3.8-27B-4bit |
+|---|---|---|
+| `model_type` | `qwen3_5` | `qwen3_5` |
+| Layers / layers caching KV | 64 / 16 (3 linear : 1 full) | **identical** |
+| `head_dim` · KV heads | 256 · 4 ⇒ ~64 KB/token | **identical** |
+| Native window | 262,144 | **identical** |
+| Tensors | 2180 (1847 LM + 333 vision) | **identical** |
+| MTP head | declared, **empty in the artifact** | declared, **empty in the artifact** (0 of 2180) |
+| Quantization | 2-bit, group 128 | **4-bit, group 64** |
+| Base checkpoint | prism-ml ternary fine-tune of Qwen3.6-27B | **`Qwen/Qwen3.8-27B`** |
+
+So the pair is controlled **for architecture** and for nothing else. The measurements confirmed
+the table rather than merely trusting it: the same 2,048 cache block, the same prefill ladder
+step for step, patience ceilings within 1 %. This adds **no new capability shape** to the roster;
+it adds the one comparison this box can make without an architectural confound.
+
+It is a VLM with `language_model_only: False`, so the vision tower loads (**333 tensors,
+0.922 GB, resident**) on a profile that serves a coding model only — the same ~0.9 GB Bonsai
+pays, and the same open question.
+
+**15.34 GB resident, and the unit is a trap.** That is oMLX's own `actual:` figure, which is what
+every other row in the roster table quotes, so it is the comparable number. But it must be read
+as **GiB**: 15.34 GB would be *less* than the 16.05 GB of weights on disk, which is impossible
+for a strict load. As GiB it is 16.47 GB, or 0.42 GB over the store, matching Bonsai's own
+margin. **Never subtract 15.34 from a GB budget.** Measure with `vmmap -summary`, not
+`footprint -p`, which rounds to whole GB at this size; `ps` RSS under-reads by **2.2×** here
+(8.15 GB against 17.7 GiB), because MLX allocates through `IOAccelerator`.
+
+**What 4 bits buy and cost, measured side by side on one day:**
+
+| | Qwen3.8-27B 4-bit | Ternary Bonsai | Ratio |
+|---|---|---|---|
+| Store | 16.05 GB | 7.9 GB | **2.03×** |
+| Resident (`actual:`) | 15.34 GB | 8.44 GB | **1.82×** |
+| Decode, short | 20.7 tok/s | 35.5 tok/s | **0.58×** |
+| Decode, 20k (isolated probe) | 18.6 tok/s | 25.0 tok/s | 0.75× |
+| Door charge, 12.8k | 61.45 / 63.07 s | 56.72 / 59.59 s | **+7 %** |
+| Cold model load | 4.24–5.41 s | 2.89–3.03 s | — |
+| Cache block · patience ceiling | 2,048 · 21,127 | 2,048 · ~21,000 | identical |
+
+**The gap is almost purely a decode gap, and that half is cleanly attributable.** Decode is
+bandwidth-bound, so it is priced in bytes per token: 2.03× the store buys 0.58× the rate.
+Prefill is compute-bound, so 4 bits cost only ~7 % there. A 500-token answer costs about **28 s**
+here against about **20 s** on the default.
+
+**The capability half is not attributable, and this section does not claim it is.** Three
+differences move together — the quantization, the base checkpoint, and a `reasoning_effort` dial
+that **only Qwen3.8 has**. What the comparison can say is that **the two shipping profiles are
+indistinguishable at agentic length** (see Capability at agentic context), which is the question
+the default rests on. What it cannot say is what the 2-bit quant costs in capability.
+
+**Its short-prompt lead is real and cannot be read against `--muse`.** 12/12 and 11/12 pass@1
+over two arms against a same-day Bonsai's 7/12, 0 runaways in 24 runs, 1.81 min per solved task
+against 4.47 — far outside this suite's 1–2 verdict band at that length. Muse's recorded 9/12
+comes from a different day, a different build (before `patch-omlx-vlm-tools.mjs` landed) and no
+side-by-side arm. Displacing `--muse` needs its own measurement; nothing here does it.
+
+**It pins one behaviour, and it is the only model on this roster that does:** `reasoning_effort`
+at `medium`. Unpinned it spends the whole 8,192-token budget and answers nothing on 7 of 12 runs.
+See Qwen3.8's `reasoning_effort` pin.
+
+Its context is **65,536 declared with a 69,632 rail** — its twin's pair, chosen so the two
+profiles differ in one variable. The honest limit: **nothing has ever prefilled this model past
+~28.3k**; the 65,536 figure rests on identical KV arithmetic and a curve that predicts every
+measured rung within 4 %. If a run ever aborts near the declared window, that is the decision to
+re-open, and the fix is a smaller declared number — not a larger rail.
+
+#### Its tool calls need no patch of ours
+
+Qwen3.8 renders a call as `<tool_call><function=NAME><parameter=KEY>value</parameter>…`. Nothing
+in this repo had parsed that format, and Muse's ATEM patch is selected for `muse_glimmer` alone
+and does not apply. **oMLX infers its own native parser** — it logs `VLM tool calling enabled:
+parser=qwen3_coder` — and reads the format correctly.
+
+Proved under agentic conditions, not merely at the serve-check gate: **78 tool calls over 26
+turns with zero defects** — 16 tools declared, four calls in one turn (the exact shape that broke
+Muse) 14 times, a 17.6k prompt, three round trips, and a real opencode session whose 7 tool parts
+all reached `completed`. Every case ran blocking **and** streaming, because the two reach
+`add_request` through different engine entry points. No `⚙invalid`, no dotted name, no truncated
+name, no special token, no markup as visible text.
+
+**It rides the VLM lane, so `patch-omlx-vlm-tools.mjs` matters to it.** Without the tool list its
+parameters lose their schemas — a string-typed `"5"` arrives as the number `5`. `ai.sh`'s warning
+rail now tests `*Qwen3.8-27B*` alongside Muse and Bonsai, keyed on the **model id**, so a `--qwen`
+session cannot lose that repair in silence on the next oMLX upgrade. The build id carries
+`+vlmtools2`.
+
+**The honest limit:** 26 turns cannot rule out a slip at Muse's measured rate of once in 135
+turns. The claim is "no defect at the rates this suite can see", not "cannot happen".
+
+#### Two more facts worth carrying
+
+- **Do not read the load line's KV figure.** oMLX logs `Estimated memory per 64-token block:
+  16.00 MB` — 256 KB/token — because `estimate_block_memory` charges all 64 layers where only 16
+  cache KV. The real rate is **64 KB/token**. Admission reads it correctly; the scheduler's
+  eviction accounting does not. **Bonsai takes the identical over-count**, so the controlled
+  comparison is unaffected.
+- **It registers two stop ids** (248046 and 248044) against Bonsai's one, and its tokenizer
+  resolves as `Qwen2Tokenizer` rather than `TokenizersBackend` — a different streaming
+  detokenizer, checked clean. It **samples**, as its `generation_config` asks; probe that, never
+  infer it.
 
 ## Door charge vs per-turn prefill
 
@@ -425,29 +679,54 @@ tokens.
 
 **`cached_tokens` rounds down to a block, and the block size is per model — not 2048
 everywhere.** This was measured on Bonsai first and written down as a general rule; it is
-not one. Measured on all three at ~22k with a byte-identical prefix:
+not one. Measured at ~22k with a byte-identical prefix:
 
 | Model | `cached_tokens` | Block | Fresh tokens re-prefilled per turn |
 |---|---|---|---|
 | Muse Glimmer | 20,480 | 2,048 | 1,236–1,259 |
 | Ternary Bonsai | 22,528 | 2,048 | 800–823 |
+| Qwen3.8 27B | — | 2,048 | 512–1,359 |
 | **GLM 4.7 Flash** | 21,760 / 22,016 | **256** | **9–289** |
 
-So budget ~2k of re-prefill per turn on Muse and Bonsai, and almost none on GLM. Quoting the
-2048 rule for GLM understates its cache by a factor of eight.
+So budget ~2k of re-prefill per turn on Muse, Bonsai and Qwen3.8, and almost none on GLM.
+Quoting the 2048 rule for GLM understates its cache by a factor of eight. Qwen3.8 takes the
+2,048 block for the same reason Bonsai does, and oMLX says so in the log: `Enlarging paged cache
+block_size=256 to 2048 for ArraysCache hybrid model`.
 
-**The door charge is paid once per model, not once per turn — confirmed on all three.** With
-a constant prefix at the head of every request, a ~22k visit cost 130.4 s cold and 26.0 s
-warm on Muse, 203.8 → 23.6 s on Bonsai, 92.2 → 20.6 s on GLM. This is what makes a
-long-context measurement affordable at all.
+**The door charge is paid once per model, not once per turn — confirmed on all three of the
+models it was tested on.** With a constant prefix at the head of every request, a ~22k visit cost
+130.4 s cold and 26.0 s warm on Muse, 203.8 → 23.6 s on Bonsai, 92.2 → 20.6 s on GLM. This is
+what makes a long-context measurement affordable at all.
 
 So the door charge buys a session, and it gates the **default** choice only.
+
+**Every door charge quoted here is a fresh-cache number.** The same 12,800-token prompt cost
+61.45 / 63.07 s on a cache pruned to 4.83 GB and **73.85 s** once ~15 GB had accumulated —
+**+19 %** on Qwen3.8, and Bonsai drifted the same way on the same rung (56.72 / 59.59 →
+71.10 s, **+22 %**). A third measurement on 2026-08-17 put it at **+35 %** (56.5 → 76.4 s at
+12.8k, 12 GB → the 25 GB cap, kernels held constant), so read +19–35 % rather than +19–22 %. So
+cache occupancy is not only a disk-space question: it moves the number every roster row is quoted
+at, and by more than the native Metal kernels save. **The cause is not isolated** — the startup
+scan, eviction work and the filesystem are all unexcluded — so this is a reason not to *raise*
+the cache budget, and never a reason to lower it.
+
+**This is the trap that makes an unguarded A/B lie.** The same day, the naive kernels-on against
+kernels-off comparison read **1.53×** and the honest one **1.13×**: the drift was larger than the
+effect, and only a reversal control separated them. Never compare two arms taken at different
+cache occupancies. Re-run the first arm last.
 
 ### Measuring prefill
 
 **Isolate prefill with `max_tokens: 1`.** Never infer it by subtracting decode from the log
-line: oMLX builds report `tok/s` differently (end-to-end vs decode-only), so the arithmetic
-silently disagrees between versions. One token of output isolates prefill on either.
+line: oMLX reports `tok/s` differently (end-to-end vs decode-only), so the arithmetic silently
+disagrees. One token of output isolates prefill either way.
+
+**The disagreement is sharper than "between versions" — the same build disagrees with itself
+between lanes.** The non-streaming lane divides by the **whole wall clock**; the streaming lane
+divides by **decode alone**. The gap is the prefill, so it grows with the prompt: three
+controlled pairs (same prompt, same model, one flag different) read 6.2 against 30.5 tok/s on a
+short prompt and **2.0 against 18.9 tok/s at 17.7k**. Record which lane a rate came from, every
+time.
 
 Two readings that mislead, recorded so nobody repeats them:
 
@@ -460,16 +739,21 @@ Two readings that mislead, recorded so nobody repeats them:
 
 Full measured prefill, directly at `max_tokens: 1`:
 
-| Prompt | Muse Glimmer | Ternary Bonsai | GLM 4.7 Flash |
-|---|---|---|---|
-| ~10k | 54.05 / 57.34 s | 47.29 / 54.86 s | ~25 s at 14.9k |
-| ~12.8k | **64.46 / 68.84 s** | **66.20 s** | — |
-| ~25k | 154.90 / 155.70 s | 147.52 / 151.22 s | — |
-| ~33k | — | — | 116 s |
-| ~41k | — | — | 266 s (throttled) |
-| ~65k | 414.16 s | 443.82 s | unreachable |
-| Cold model load | 4.64 s | 2.89 s | 5.5–8.9 s |
-| Warm 25k restore | 3.52–3.79 s | 3.35–3.93 s | 1.0–2.0 s at 14.9k |
+| Prompt | Muse Glimmer | Ternary Bonsai | Qwen3.8 27B | GLM 4.7 Flash |
+|---|---|---|---|---|
+| ~10k | 54.05 / 57.34 s | 47.29 / 54.86 s | 48.94 / 49.49 s | ~25 s at 14.9k |
+| ~12.8k | **64.46 / 68.84 s** | **66.20 s** (56.72 / 59.59 re-measured) | **61.45 / 63.07 s** | — |
+| ~25k | 154.90 / 155.70 s | 147.52 / 151.22 s | 144.03 / 152.94 / 153.47 s | — |
+| ~33k | — | — | — | 116 s |
+| ~41k | — | — | — | 266 s (throttled) |
+| ~65k | 414.16 s | 443.82 s | not reached — fitted 614 s | unreachable |
+| Cold model load | 4.64 s | 2.89–3.03 s | 4.24–5.41 s | 5.5–8.9 s |
+| Warm 25k restore | 3.52–3.79 s | 3.35–3.93 s | 3.44 s | 1.0–2.0 s at 14.9k |
+
+The Bonsai and Qwen3.8 columns were measured on one day in one harness, which is what makes
+them comparable to each other; the Muse and GLM columns are older. **Nothing has prefilled
+Qwen3.8 past ~28.3k** — its ~65k figure is fitted (`a = 3.925148e-03`, `b = 8.306649e-08`, seven
+cold rungs, every point within 4 %), not measured.
 
 **Prefill scales well and starts badly.** 6.5× the tokens (10 k → 65 k) costs only 1.2× the
 per-token rate. The constant factor is the whole problem, and it is what a dense forward pass
@@ -480,12 +764,13 @@ cold.
 
 ## Context windows
 
-`opencode.json` declares **65,536 / 8,192 output** for Muse and Bonsai, and **32,768 / 8,192**
-for GLM. Understanding why they differ takes three steps, each of which corrected the one
-before it.
+`opencode.json` declares **65,536 / 8,192 output** for Muse, Bonsai and Qwen3.8, and
+**32,768 / 8,192** for GLM. Understanding why they differ takes three steps, each of which
+corrected the one before it.
 
-**1. It is not KV size.** All three models have cheap KV — 1.0 GB (Muse), 4.0 GB (Bonsai),
-3.3 GB (GLM) at 65 k. KV was never the binding constraint on any of them.
+**1. It is not KV size.** Every model here has cheap KV — 1.0 GB (Muse), 4.0 GB (Bonsai and
+Qwen3.8, which share an architecture), 3.3 GB (GLM) at 65 k. KV was never the binding constraint
+on any of them.
 
 **2. It is not memory either.** The real wall is the **prefill activation transient** against
 Apple's Metal working-set cap — **51.84 GiB** on this box. (The abort limit is
@@ -496,16 +781,23 @@ against that 51.84 GiB cap, so memory had headroom the whole time.
 **3. It is time.** Prefill grows as `a·n + b·n²`. You wait at most **120 s** for a cold open.
 Fitting the measured rungs below the throttle solves to **~32,311 tokens** at 120 s for GLM —
 so 32,768 lands within **1.5 %** of the patience boundary by accident. Muse reaches only
-~22,800 tokens in the same 120 s, and Bonsai — the default — about **~21,000**, interpolated
-between its measured 66.20 s at 12.8k and 147.52 s at 25k rather than fitted. **The default
-therefore has the tightest patience boundary of the three.**
+~22,800 tokens in the same 120 s, Qwen3.8 **21,127** (fitted over seven cold rungs), and Bonsai
+— the default — about **~21,000**, interpolated between its measured 66.20 s at 12.8k and
+147.52 s at 25k rather than fitted. **The default and its 4-bit twin have the tightest patience
+boundaries on the roster, within 1 % of each other.**
 
 This reason is **stable**: unlike the memory one, it does not move if a future oMLX fixes the
 guard, and it applies to every profile. **No profile on this box opens a 45,000-token file in
 two minutes**, so switching profile is not a workaround.
 
-Muse and Bonsai keep a flat 65,536 anyway, because a session grows one cached turn at a time
-and only a single pathological turn pays the full-window cost.
+**The patience ceiling does not set the declared context, and never did.** Muse, Bonsai and
+Qwen3.8 all declare 65,536 against ceilings around 21–23k, because a session grows one cached
+turn at a time and only a single pathological turn — one very large file arriving whole — pays
+the full-window cost. A session that *grows* to 65k pays its door charge once and then ~2k of
+re-prefill per turn. **Only GLM sits on its own ceiling, and that is a safety number rather than
+a patience one**: with its KV estimate corrected the memory guard admitted 45,072 tokens and the
+prefill then force-stopped against the physical Metal cap, unloading the model and costing ~5
+minutes. No other model on this roster has that failure to guard against.
 
 **The lever, if you ever need it:** `sudo sysctl iogpu.wired_limit_mb=57344` raises the Metal
 cap. It was approved mid-investigation and then declined, because nothing on this roster
@@ -609,7 +901,7 @@ Symlinked to `~/.config/opencode/opencode.json`. Two providers matter.
 
 ### Provider `mlx` — the local oMLX endpoint
 
-Port 10081, OpenAI-compatible, declaring all three roster models with their context and output
+Port 10081, OpenAI-compatible, declaring all four roster models with their context and output
 limits and a 600 s timeout. Every row sets `"temperature": false`, so opencode omits the option
 and oMLX falls back to each model's own `generation_config.json`.
 
@@ -617,20 +909,25 @@ and oMLX falls back to each model's own `generation_config.json`.
 models.dev entry, so `-m mlx/<id>` only resolves while they exist — and that flag is how `ai.sh`
 pins the local model.
 
-**oMLX does not honour `do_sample`.** All three models sampled, including Muse, whose
+**oMLX does not honour `do_sample`.** All four models sampled, including Muse, whose
 `generation_config.json` sets it false, and Bonsai, which ships no such file. Never infer
 determinism from a config — probe it.
 
 ### Provider `lmstudio` — the cross-runtime A/B
 
-Declares the two models LM Studio can actually run, so the same weights can be compared across
+Declares the models LM Studio can actually run, so the same weights can be compared across
 both runtimes. Nothing in this repo drives it; it is used by hand.
 
 Three facts it took two tickets to establish:
 
-- **`whitelist` is required.** `lmstudio` is a **built-in models.dev provider**, so a `models`
-  block *extends* its roster rather than replacing it — without the whitelist the picker lists
-  three phantom models this box does not hold.
+- **`whitelist` is required, and every model must be listed TWICE.** `lmstudio` is a
+  **built-in models.dev provider**, so a `models` block *extends* its roster rather than
+  replacing it — without the whitelist the picker lists three phantom models this box does not
+  hold. But the filter opencode applies is
+  `blacklist.includes(id) || (whitelist && !whitelist.includes(id))` → **delete the model**, so
+  a model declared under `models` and absent from `whitelist` is not merely unlisted: it is
+  removed. Adding a model here means editing both arrays. Qwen3.8 was added to one of them and
+  was dead until 2026-08-17.
 - **GLM needs `options.stop`.** LM Studio honours only the single `eos_token` in
   `tokenizer_config.json` and ignores the other two ids `config.json` declares (`<|user|>`
   154827, `<|observation|>` 154829). GLM ends its turns with `<|user|>`, so nothing stops it: it
@@ -650,8 +947,7 @@ or every agentic turn fails in two seconds.
 `-m mlx/<id>`, and a CLI flag beats the config default, so the roster is unaffected by whatever
 this key names.
 
-It currently names `zai/glm-5.2` (an uncommitted working-tree change; `HEAD` has
-`vercel/alibaba/qwen3.8-max`). Note that `~/.local/share/opencode/auth.json` holds credentials
+It currently names `zai/glm-5.2`. Note that `~/.local/share/opencode/auth.json` holds credentials
 for `anthropic`, `vercel` and `openrouter` only — so that default needs its own
 `opencode auth login` before a bare `opencode` session will run.
 
@@ -674,10 +970,19 @@ a request by stripping everything before the first `/` and re-matching, and keys
 against the result. An entry under the two-level id alone is **silently never consulted**. The
 patch writes **both** spellings for every model.
 
-**The roster pins no behaviour.** No `enable_thinking`, no `mtp_enabled`, no reasoning-strength
-cap. All three models split `reasoning_content` from `content` correctly at their own defaults.
+**The roster pins one behaviour, on one model:** Qwen3.8's `chat_template_kwargs`
+`{"reasoning_effort": "medium"}`. No `enable_thinking` anywhere, no `mtp_enabled` anywhere, and
+no other reasoning setting. All four models split `reasoning_content` from `content` correctly
+at their own defaults. See Qwen3.8's `reasoning_effort` pin for the measurement behind it; it is
+a **default**, so a client that sends its own `chat_template_kwargs` still wins.
 
-**It does pin one safety rail per model:** `max_context_window` = the declared opencode context
+**One further pair of keys is written, and it is off:** Qwen3.8's `vlm_mtp_enabled` (false unless
+`AI_QWEN_MTP=1`) and `vlm_mtp_draft_model` (`Qwen3.8-27B-MTP-4bit`, always written). This is the
+**external-drafter** speculative route, not `mtp_enabled`, and it is under measurement — see
+Speculative decode. The `false` is written rather than omitted on purpose: the patch never deletes
+a key, so an absent entry cannot express "declined".
+
+**It also pins one safety rail per model:** `max_context_window` = the declared opencode context
 **plus one 4,096-token block**.
 
 | Model | `limit.context` (budget) | `max_context_window` (rail) |
@@ -685,12 +990,14 @@ cap. All three models split `reasoning_content` from `content` correctly at thei
 | GLM 4.7 Flash | 32,768 | 36,864 |
 | Ternary Bonsai | 65,536 | 69,632 |
 | Muse Glimmer | 65,536 | 69,632 |
+| Qwen3.8 27B | 65,536 | 69,632 |
 
 The two numbers do different jobs and **must not be equal**. `limit.context` is the client's
 budget; `max_context_window` is a rail against clients that never read `opencode.json` at all —
 the memory summarizer, smart-coding, a stray script. Without it oMLX resolves the cap from the
-model's native window (202,752 / 262,144 / 131,072), so such a client can send a prompt far past
-what this box can prefill and pay minutes before it fails. Mirroring them exactly was tried and
+model's native window (202,752 for GLM, 262,144 for Bonsai and Qwen3.8, 131,072 for Muse), so
+such a client can send a prompt far past what this box can prefill and pay minutes before it
+fails. Mirroring them exactly was tried and
 is wrong: opencode estimates tokens with its own tokenizer, so a prompt built for 32,768 arrived
 as 32,784 and was hard-rejected. One block of headroom absorbs that drift.
 
@@ -723,6 +1030,42 @@ A related finding: **a runaway reports `reasoning_content` empty**, because oMLX
 only at the closing tag. So a turn that hits the output cap mid-reason looks like a turn that
 never reasoned.
 
+### Qwen3.8's `reasoning_effort` pin — the same experiment, the opposite result
+
+`--qwen` is the one profile that pins behaviour: `chat_template_kwargs`
+`{"reasoning_effort": "medium"}`. Read it beside GLM's reverted pin above — same shape of
+intervention, opposite outcome, and the difference is *why* the model was reasoning.
+
+**`medium` removes an instruction; it does not add a cap.** The model's own
+`chat_template.jinja` resolves the kwarg to one of three values and injects a different
+paragraph for each: `xhigh` (its default) asks it to "validate key assumptions, consider
+plausible alternatives", `low` asks for brevity, and **`medium` injects nothing at all**. So the
+neutral middle is the absence of the `xhigh` paragraph. An out-of-range value raises inside the
+template, so a typo fails loudly.
+
+| Qwen3.8 at short prompts | pass@1 | pass@≤2 | Runaways | Wall | min/solved |
+|---|---|---|---|---|---|
+| `xhigh`, its own default | 5/12 | 5/12 | **7/12** | 64.2 min | 12.84 |
+| **`medium`, arm 1** | **12/12** | **12/12** | **0/12** | 21.8 min | **1.81** |
+| **`medium`, arm 2** | **11/12** | **12/12** | **0/12** | 21.9 min | **1.82** |
+| Ternary Bonsai, same day, no such control | 7/12 | 8/12 | 3/12 | 35.7 min | 4.47 |
+
+**Nothing was traded away.** GLM's pin bought 0 runaways and cost two solved tasks, because its
+reasoning was *producing* its answers. Qwen3.8's reasoning at `xhigh` was **preventing** them:
+it passed every run it finished either way, so removing the paragraph converted 7 dead turns
+into answers instead of into wrong answers. It also got 3× cheaper.
+
+**Two cautions.** The pin is a **default**, not a lock — `merge_chat_template_kwargs` puts
+`settings.chat_template_kwargs` at the lowest precedence, so a client sending its own
+`chat_template_kwargs` overrides it. Do **not** add `forced_ct_kwargs`. And these are
+short-prompt figures: at ~17.6k this roster's rankings have inverted before.
+
+**Prove a pin arrives; never assume it.** `prompt_tokens` on a fixed prompt reads 59 at `xhigh`,
+47 at `low` and 17 at `medium` — and 17 with no kwarg sent, once the pin is written. That is the
+whole proof, and it is worth running after an oMLX upgrade: W5 found `tools` silently dropped on
+this same VLM lane, and a blind setting looks identical to a working one in every log. The probe
+is `pin-arrival.py` in `.wayfinder/qwen-profile/assets/w12-reasoning-cap/`.
+
 ### Serve-check gate
 
 Every serve check must assert **`finish_reason: stop` and non-empty `content`, with `max_tokens`
@@ -736,8 +1079,47 @@ Bonsai spends ~1300 reasoning tokens before answering. Measuring at 4096 when pr
 
 ## Speculative decode — off, by measurement
 
-**MTP stays off.** GLM carries an MTP head but nothing here has measured it; Bonsai's declared
-head is empty (0 of 2180 tensors); Muse has none.
+**MTP stays off — but the reason recorded here was wrong, and one route is now open.**
+
+**`mtp_enabled` stays off, and that part still holds.** That setting attaches a head found
+*inside* the checkpoint. GLM carries one but nothing here has measured it; Bonsai's and Qwen3.8's
+declared heads are both **empty** (0 of 2180 tensors each), and oMLX detects that and skips
+attachment on its own; Muse has none. Write no `mtp_enabled` entry for either `qwen3_5` model, and
+do not read a flat decode rate as MTP failing to engage.
+
+**What was wrong: "empty" describes our artifact, not the model.** The MLX conversion stripped the
+head; the GGUF of the same weights kept it (`qwen35.nextn_predict_layers=1`,
+`blk.64.nextn.{eh_proj,enorm,hnorm,shared_head_norm}`). oMLX names this exact class of export at
+`omlx/utils/model_loading.py:797`. So the mechanism note above is right and the conclusion drawn
+from it — that MTP is unreachable on this architecture — is **not**.
+
+**A second route reaches it, and it engages on `--qwen` today.** `vlm_mtp_enabled` attaches an
+**external** drafter whose `model_type` is `qwen3_5_mtp`, so our checkpoint's empty head does not
+block it. Verified 2026-08-17 with `mlx-community/Qwen3.8-27B-MTP-4bit` (239 MB): the drafter
+attaches, MTP takes the route on **every** request including tool calls on both lanes, the
+`reasoning_effort` pin survives, and resident rises only **15.34 → 15.81 GB**.
+
+**It ships off, and it stays off until the rule fires.** `AI_QWEN_MTP=1` is the opt-in;
+unset writes `vlm_mtp_enabled: false` explicitly, because `patch-omlx-mtp.mjs` never deletes a
+key. **No speed has been measured** — acceptance runs 64–85 % at 2.29–2.71 tokens per round, and
+`tokens_per_round` is an **upper bound on** a speedup, not a speedup: each round costs a drafter
+forward plus a target verify. The decision rule and the arm harness are at
+`.wayfinder/perf-headroom/tickets/02-native-mtp-qwen.md`.
+
+Three facts to carry if you touch this:
+
+- **`vlm_mtp_draft_model` must be the directory LEAF** (`Qwen3.8-27B-MTP-4bit`), never the
+  two-level id. `engine_pool.py:1980` does a plain `_entries.get()` with no `resolve_model_id`,
+  `_entries` is keyed by the leaf, and on a miss `mlx_vlm.utils.get_model_path` calls
+  `snapshot_download` — so a two-level id makes the **server** download a **second copy of the
+  weights**. This is the opposite of the rule for settings *keys*, which go in both spellings.
+- **It is not a blind setting.** `vlm_mtp decode started …` proves engagement and
+  `vlm_mtp stats: … accepted=22/26 (84.6%) tokens_per_round=2.69` gives the acceptance rate, both
+  at INFO. Every fallback reason logs too. `get_speculation_stats()` remains unreachable and is
+  not needed.
+- **MTP does not stack with concurrency.** `_route_to_vlm_mtp` returns `None` while
+  `_vlm_mtp_active` is non-empty, so with `--max-concurrent-requests 2` a summarizer overlapping a
+  coding turn falls back to BatchGenerator and logs `drafter is busy`.
 
 **DFlash was tried on Muse Glimmer and lost on every axis.** Decode **−15 %** (26.9 → 22.8
 tok/s), cold prefill **+21 %** (194 → 161 tok/s), peak RSS +3.9 GB, and two concurrent requests
@@ -778,6 +1160,35 @@ edits with:
 - **Unit-test the settings patch in isolation**: `node scripts/patch-omlx-mtp.mjs /tmp/ms.json`
   against a throwaway path, then assert the merge — fresh-create, idempotent re-run (no
   rewrite), a pre-existing model preserved, recovery from a corrupt file. No oMLX needed.
+- **Prove a model still has a load path, after every oMLX upgrade**:
+  `~/.omlx/venv/bin/python .wayfinder/qwen-profile/assets/w1-load-path/load-path-probe.py <dir>`.
+  It walks the same steps `mlx_vlm.utils.load` walks and stops before `load_weights`, so it
+  **needs no weights** — it reads the ~27 MB of metadata beside the shards. It exists because
+  **Qwen3.8 and Bonsai fail processor loading differently under stock transformers** — a
+  `ValueError` for one, an `ImportError` for the other — and one oMLX patch,
+  `_patch_video_processor_bug`, repairs both. An upgrade that changes that patch can break
+  Qwen3.8 while Bonsai still loads, and nothing else in this repo would notice.
+- **Prove the native Metal kernels survived an oMLX upgrade** — an upgrade drops the compiled
+  extensions, and every failure logs at DEBUG only, so the loss is silent:
+  ```bash
+  ~/.omlx/venv/bin/python -c 'from omlx.custom_kernels import native_kernel_status as s; print(s())'
+  ```
+  All four must read `available: True`. If not, rebuild (see Dependencies). The launcher already
+  fails safe here — the build id loses its `+kernels…` suffix, which forces one restart — but a
+  restart does not rebuild anything. Confirm at the *patch* level too, since availability and
+  application are different things: a server log for a `qwen3_5` model must carry
+  `FA-256 steel attention patch applied` and `quantized MLP prefill patch applied`. Those lines
+  appear at **model load**, not at server start, so grep the log after the first real request.
+- **Prove a `chat_template_kwargs` pin still arrives**. A blind setting looks identical to a
+  working one in every log; `prompt_tokens` on a fixed prompt is the only signal — 17 at `medium`
+  against 59 unpinned.
+  ```bash
+  python3 .wayfinder/qwen-profile/assets/w12-reasoning-cap/pin-arrival.py \
+    --base http://127.0.0.1:10081/v1 --mode settings --expect medium
+  ```
+  **Both flags are required and the default `--base` is dead.** `--mode` has no default, and
+  `--base` still defaults to port **10082**, the second oMLX build this repo dropped — so the
+  bare invocation this list used to give always fails with `Connection refused`.
 - `opencode agent list` — after editing `opencode.json`, confirm the agents opencode resolves and
   their `model`/permissions. **This repo ships no custom agent**; `ai.sh` actively deletes any
   left in `~/.config/opencode/agents/` by an earlier install.
@@ -818,8 +1229,20 @@ opens. It cleanly no-ops on this repo — and note it gives Bash **no** cover at
 ### Restarts, and the state file
 
 `$AI_STATE_DIR/omlx-model` holds **two lines**: the served model id, and the **build** serving
-it — `<binary path>@<git HEAD of the source checkout>`, with `+mlakv` appended when the MLA
-patch applied. A difference in **either** line forces a restart.
+it — `<binary path>@<git HEAD of the source checkout>`, with one suffix appended per source patch
+that applied, then the native-kernel set. A full line reads
+`…/omlx@350dc08b+mlakv+musetc5+vlmtools2+kernels4bgmq`. A difference in **either** line forces a
+restart, and the suffixes are **versioned on purpose**: with a flat `+musetc` an older server and
+a newer source look alike, so the launcher leaves stale code running.
+
+**`+kernels<N><initials>` is not a patch suffix and is computed differently.** The others record
+that *we* edited the source; this one records what the installed package can **import** —
+`native_kernel_status()`, ~0.06 s, one letter per available kernel, sorted. It exists because
+`OMLX_WITH_CUSTOM_KERNEL=1` rebuilds at the *same commit*, so the git HEAD cannot see it and a
+server on the unbuilt code would look current forever. Asking what imports rather than globbing
+for `.so` files also makes a present-but-ABI-broken extension read as absent, which is what it
+is. **Nothing is appended when no kernel is importable**, so a box that never builds them keeps
+the build line it always had and is not restarted for this.
 
 The build line earns its place: the oMLX install is **editable**, so the source checkout's
 commit *is* the code being served, and an in-place upgrade leaves the binary path identical.
@@ -867,6 +1290,13 @@ session still meets the case they were sized for, and **no capture has been meas
 Bonsai** — its 38 tok/s short-prompt decode suggests a shorter wall, but suggests is all it
 does. A timeout with too much headroom costs nothing; one that is too tight drops the memory
 in silence.
+
+**A fourth profile widens that gap rather than creating it, and it pulls two ways at once.**
+Qwen3.8 decodes **20.4 / 21.0 tok/s** short and 18.6 at 20k — *slower* than the Muse these
+settings were sized on, so the 180 s timeout has **less** headroom, not more. But the wall is
+reasoning-bound, and a `--qwen` capture inherits that profile's `reasoning_effort: medium` pin,
+which cut a whole coding suite's output tokens to a third. Which effect wins is **unmeasured, on
+every current profile**. The settings stay as they are until somebody measures a capture.
 
 **The abort is decode-bound, not prefill-bound.** This is the one counter-intuitive fact here,
 and it kills the obvious cure: lowering `OPENCODE_MEM_MAX_CONTEXT_CHARS` cuts the prefill but
@@ -1057,6 +1487,8 @@ commented placeholders.
 | `OMLX_CACHE_PRUNE_GB` | numeric part of `OMLX_SSD_CACHE_MAX` | Prune the on-disk KV cache to this many GB at each server (re)start, oldest-first. Derived from the same number the server is given, so the two can never disagree. Set `0` to disable |
 | `OMLX_MEMORY_GUARD_GB` | `48` | Memory ceiling oMLX will not exceed. **It does not set the prefill abort limit** — see Context windows |
 | `OMLX_MAX_CONCURRENT` | `2` | Max concurrent requests (continuous batching): 1 coding turn + 1 summarizer. Don't set 1, or memory captures serialize with coding turns |
+| `AI_QWEN_MTP` | unset (off) | Set `1` to enable MTP speculative decode on `--qwen` through the external `Qwen3.8-27B-MTP-4bit` drafter. **Under measurement — no speed result yet** (W2). Anything else writes `vlm_mtp_enabled: false` explicitly. A change needs a server restart: it does not move the build id, so `ai.sh` will not restart for it |
+| `AI_QWEN_MTP_DEPTH` | unset (the drafter's own 3) | Draft block size for that route — 2 drafted tokens plus 1 bonus at the default. Inert while `AI_QWEN_MTP` is off. The head chains one MTP layer autoregressively, so depth costs drafter forwards and nothing else, and this drafter class honours the requested number directly instead of treating it as a ceiling. **Deeper is not automatically faster** — every drafted token is paid for, accepted or not. A value below 2 is refused |
 | `OPENCODE_MEM_MODEL` | set by `ai.sh` to the session model | Summarizer model, read by the patched plugin |
 | `OPENCODE_MEM_MAX_CONTEXT_CHARS` | `24000` | Char budget the summarizer input is capped to (≈6k tokens) |
 | `OPENCODE_MEM_EXCLUDE_DIRS` | unset | Colon-separated dir prefixes where opencode-mem never captures or recalls |
@@ -1079,10 +1511,27 @@ commented placeholders.
   uv venv ~/.omlx/venv --python 3.12
   VIRTUAL_ENV=~/.omlx/venv uv pip install -e ~/.omlx/src
   ```
-  **No compiler is needed** — the custom Metal kernels are opt-in behind
-  `OMLX_WITH_CUSTOM_KERNEL`. **Upgrade in place, one build**: no second checkout, no second
-  venv. Rolling back needs explicit pins for `mlx` and `transformers`, because the pyproject
-  uses floors.
+  That install needs no compiler, and it also builds **none** of the four native Metal kernels.
+  **Build them** — measured worth 1.13–1.22× on cold prefill, see the Bonsai section:
+  ```bash
+  OMLX_WITH_CUSTOM_KERNEL=1 uv pip install -e ~/.omlx/src \
+    --no-deps --python ~/.omlx/venv/bin/python --reinstall-package omlx
+  ```
+  ~27 s, and it needs the Metal toolchain (Xcode command line tools). **`--no-deps` is
+  load-bearing**: the pyproject pins runtime deps by *floor*, so a plain reinstall can drag
+  `mlx-vlm`/`transformers` forward and take the parser patches with them. Snapshot
+  `uv pip freeze` either side and diff it.
+
+  Two traps. **The build does not restart a running server** — it leaves the git HEAD
+  unchanged, which is why `ai.sh` appends the importable kernel set to the build id instead.
+  And **the `.so` files are what get imported**, the install being editable, so reverting means
+  deleting them, not reinstalling:
+  `find ~/.omlx/src/omlx \( -name "_ext*.so" -o -name "*.metallib" \) -delete`.
+
+  **Upgrade in place, one build**: no second checkout, no second venv. An upgrade drops the
+  compiled extensions, so **rebuild after every upgrade** — `nanobind` is pinned to `mlx`'s exact
+  version, and a mismatch makes every kernel reject `mlx.core.array` at the type caster. Rolling
+  back needs explicit pins for `mlx` and `transformers`, because the pyproject uses floors.
 - **`uv`** — builds and runs the oMLX venv.
 - **`opencode`** — the frontend, sst/opencode (`brew install sst/tap/opencode`).
 - **`node`** — required by `opencode-mem` (auto-installed by opencode from the `"plugin"` array)
@@ -1113,25 +1562,85 @@ oMLX launches with explicit flags (see the `OMLX_*` variables above):
   adds transient working memory against the soft threshold; embeddings run on the separate
   `bge-m3` engine and don't compete for these slots.
 
-### `_prune_cache` is load-bearing, not a safety net
+### `_prune_cache` is a backstop for one orphan, not a general LRU
 
-**oMLX's own LRU governs only its *live* index.** Blocks orphaned by a prior run or a
-model/quant switch fall out of that index and are never revisited, so the on-disk footprint
-drifts far past the cap — observed at **122 GB against a 40 GB cap** (~19 days), filling the disk
-to 99%.
+**Read this before you act on any older note about the cache. The mechanism this section used
+to describe is not the one this build has.**
+
+It said *"oMLX's own LRU governs only its live index, so blocks orphaned by a prior run or a
+model/quant switch fall out of that index and are never revisited"*. That was true, and it
+produced a real observation: **122 GB against a 40 GB cap** over ~19 days, filling the disk to
+99 %. **That is history, from a build older than the fix**, and it is kept here only so the
+number is not mistaken for current behaviour.
+
+**Upstream `28fe5cb8 fix: enforce SSD cache limit across model switches (#1915)` (2026-06-19) is
+in this build.** Read in `omlx/cache/paged_ssd_cache.py`: a foreign model's blocks are filed in
+**`_incompatible_index`** rather than discarded, `_tracked_ssd_size()` sums the compatible **and**
+incompatible indexes, and `_evict_tracked_until_size` takes the LRU across all of them. A foreign
+model's blocks are the oldest by construction, so **they are evicted first**. oMLX enforces this
+budget itself, across models.
+
+**`skipped_incompatible=N blocks` is not a fault**, and it was read as one here. A start logging
+`skipped_incompatible=136 blocks (24.95 GB), indexed=0` is **24.95 GB tracked under a 25.00 GB
+cap** — eviction with no reason to fire yet. The first block the incoming model writes takes the
+target below the cap and evicts the oldest foreign blocks, up to 32 unlinks (~9 GB) in that one
+save. The cache self-heals in ordinary use.
+
+Four decisions follow, and none of them moves a number:
+
+- **`OMLX_SSD_CACHE_MAX` stays at 25 GB — but "no measurement moves it" is no longer true of the
+  cost side.** The argument that originally sized it is void. Raising it buys hit rate nobody has
+  measured; lowering it spends warm restores worth ~150 s each. **Hit rate is still unmeasured at
+  any budget**, and that is the one number that would settle this. Disk is not the constraint
+  (65 GiB free).
+
+  **The drift is now measured, and it is bigger than the +19–22 % recorded above.** On
+  2026-08-17 the kernel A/B carried a reversal control — the same 12,762-token cold prefill,
+  same build, kernels held constant — across a cache filling from 12 GB to its 25 GB cap:
+  **56.5 s → 76.4 s, or +35 %**. That is *larger than the native Metal kernels save* (1.13–1.22×),
+  so on this box **cache occupancy is a bigger lever on the door charge than the kernels are.**
+  Two cautions before anyone acts on it: the cause is **not isolated** (occupancy is the leading
+  candidate, thermal the other, and the arms were not ordered to separate them), and the drift
+  saturates once the cache hits the cap — the two at-cap arms read 76.4 s and 78.4 s. It is a
+  reason to **measure hit rate next**, not a reason to move the number.
+- **`_prune_cache` keeps its trigger and its bluntness, for exactly one surviving orphan.**
+  `_read_file_metadata` returns `None` — so a block enters no index, counts toward no budget and
+  is **never** evicted — when its `omlx_cache_format_version` falls outside
+  `_READABLE_CACHE_FORMAT_VERSIONS`. The oMLX install is **editable**, so any `git pull` in the
+  source checkout can bump that version and strand the whole cache as untracked, immortal bytes.
+  Narrowing the prune to read each header and drop only unreadable blocks was considered and
+  **declined**: it would copy oMLX's version set into `ai.sh`, where it drifts silently on the
+  next upgrade, and a drifted copy deletes **live** blocks. The blunt version's failure mode is a
+  miss and a recompute.
+- **A model switch does not prune, by decision.** A switch does not kill the outgoing model's
+  blocks; it makes them **dormant**. They serve a warm restore at ~3.4 s against ~150 s cold on
+  the return, and with four profiles a switch is ordinary. oMLX already evicts them first when the
+  budget binds, which is the correct order and needs no help.
+- **The at-cap trigger does not change.** The case it is accused of missing is oMLX behaving
+  correctly.
 
 `_prune_cache` deletes blocks oldest-first (mtime = LRU, matching oMLX's intent) at every server
 (re)start. It runs only with the server down, so nothing holds the blocks live; blocks are
-content-addressed, so a lookup for a pruned one is just a miss → recompute, which is the safe
-failure mode.
+content-addressed, so a lookup for a pruned one is just a miss → recompute.
 
-**A model switch orphans the whole cache.** One switch logged
-`skipped_incompatible=399 blocks (5.15 GB)` — the previous model's entire cache, unusable. And
-one measurement session on a slow-prefill model took the cache from 5.15 GB to **24 GB**. So
-25 GB is a working budget, not generous headroom; expect to start from a full cache. Muse
-Glimmer contributes almost nothing to it (its 13 KB/token KV never fills the 8 GB hot tier), so
-the budget is sized by Bonsai and GLM alone — **and since 2026-08-14 one of those two is the
-default**, so the cache now fills in ordinary use rather than only during measurement runs.
+**Price the cache in blocks, not in KV — they are not the same number.** A `qwen3_5` block is
+**288,178,144 bytes for 2,048 tokens ⇒ ~141 KB/token**, which is **2.2×** the ~64 KB/token the KV
+arithmetic gives. Both figures are right; they measure different things:
+
+| Layer kind | Count | Total per block |
+|---|---|---|
+| `KVCache` (full attention) | 16 | 134.2 MB |
+| `ArraysCache` (linear attention) | 48 | ~154.0 MB |
+
+The KV half **is** exactly 64 KB/token. The other half is the linear-attention state, and it is
+**53 % of the block, fixed per block, independent of how many tokens the block holds**. So the
+budget in blocks: **25 GB ≈ 89 blocks ≈ 182k tokens of prefix**, shared across the whole roster,
+and a ~20k-token session costs ~10 blocks ≈ 2.9 GB. **This figure covers the two `qwen3_5` models
+only** — Bonsai and Qwen3.8. Muse's and GLM's blocks were never opened, and their layer mixes
+differ. Muse contributes almost nothing to the budget in any case (its ~13 KB/token KV never fills
+the 8 GB hot tier); Qwen3.8's KV matches Bonsai's, so it fills the hot tier and spills to SSD.
+
+**What the four-model roster costs this budget has not been measured.** Do not invent a number.
 
 **Deleted space may not appear as free.** macOS holds it in APFS Time Machine local snapshots
 until it needs it — the space is *purgeable* rather than free, and `df` will not move. Deleting
@@ -1151,7 +1660,13 @@ those snapshots destroys backup history and is your call, not the launcher's.
 - **Config symlinks**: `opencode.json` and `opencode-mem.jsonc` → `~/.config/opencode/`;
   `plugins/post-edit-check.js` → `~/.config/opencode/plugins/` (plural).
 - **`get_speculation_stats()` is not reachable** from the CLI — it is served only from
-  `/admin/api/activity`, which 401s without a session cookie.
-- **The route that produced this file** is charted at `.wayfinder/model-roster-swap/`: the map,
-  one ticket per decision, and the measurement assets under `assets/`. Read a ticket before
-  re-opening the question it closed.
+  `/admin/api/activity`, which 401s without a session cookie. **You do not need it for MTP**: the
+  ordinary server log carries `vlm_mtp decode started …` and a per-request
+  `vlm_mtp stats: … accepted=N/M (P%) tokens_per_round=…` at INFO.
+- **The routes that produced this file** are charted under `.wayfinder/`: the map, one ticket
+  per decision, and the measurement assets under each map's `assets/`. `model-roster-swap/`
+  built the three-model roster and moved the default to Bonsai; `qwen-profile/` added `--qwen`
+  and priced the 2-bit quant against it. `perf-headroom/` is **open**: W1 built the four native
+  Metal kernels and caught a drift larger than the effect it was measuring; **W2 is in progress**
+  — it has native MTP engaging on `--qwen`, its decision rule fixed in writing, and its timed arms
+  not yet run. Read a ticket before re-opening the question it closed.

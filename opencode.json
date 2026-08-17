@@ -10,7 +10,11 @@
       "options": {
         "baseURL": "http://127.0.0.1:1234/v1"
       },
-      "whitelist": ["zai-org/glm-4.7-flash", "prism-ml/bonsai-27b"],
+      "whitelist": [
+        "zai-org/glm-4.7-flash",
+        "prism-ml/bonsai-27b",
+        "lmstudio-community/Qwen3.8-27B-MLX-4bit"
+      ],
       "models": {
         "zai-org/glm-4.7-flash": {
           "name": "GLM 4.7 Flash 6-bit (LM Studio)",
@@ -25,6 +29,14 @@
         },
         "prism-ml/bonsai-27b": {
           "name": "Ternary Bonsai 27B 2-bit (LM Studio)",
+          "temperature": false,
+          "limit": {
+            "context": 65536,
+            "output": 8192
+          }
+        },
+        "lmstudio-community/Qwen3.8-27B-MLX-4bit": {
+          "name": "Qwen3.8 27B 4-bit",
           "temperature": false,
           "limit": {
             "context": 65536,
@@ -62,6 +74,14 @@
         },
         "mlx-community/Muse-Glimmer-30B-4bit": {
           "name": "Muse Glimmer 30B 4-bit",
+          "temperature": false,
+          "limit": {
+            "context": 65536,
+            "output": 8192
+          }
+        },
+        "lmstudio-community/Qwen3.8-27B-MLX-4bit": {
+          "name": "Qwen3.8 27B 4-bit",
           "temperature": false,
           "limit": {
             "context": 65536,

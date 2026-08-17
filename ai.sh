@@ -103,12 +103,14 @@ ai() {
   # being served. An unresolvable HEAD reads as "unknown", which is stable and
   # therefore never forces a spurious restart.
   #
-  # oMLX's own LRU governs only the *live* index, so blocks orphaned by prior
-  # runs/model switches leak on disk far over the cap (observed: 122 GB vs a
-  # 40 GB cap). _prune_cache enforces the budget at each server (re)start — safe
-  # because _start_server only runs while no oMLX server is up. The server cap and
-  # the prune target come from the same number so they cannot disagree. Set
-  # OMLX_CACHE_PRUNE_GB=0 to disable pruning.
+  # 25GB is the cache budget oMLX enforces, NOT a guard against oMLX. It was
+  # sized against unbounded drift (observed: 122 GB vs a 40 GB cap) on a build
+  # older than 2026-06-19; upstream 28fe5cb8 (#1915) closed that, and W13 kept
+  # the number for want of a measurement either way. _prune_cache stays as a
+  # backstop for the one orphan oMLX still cannot see — see its own comment.
+  # It runs at each server (re)start, safe because _start_server only runs while
+  # no oMLX server is up. The server cap and the prune target come from the same
+  # number so they cannot disagree. Set OMLX_CACHE_PRUNE_GB=0 to disable pruning.
   _resolve_runtime() {
     omlx_bin="${OMLX_BIN:-}"
     if [[ -z "$omlx_bin" ]]; then
@@ -129,7 +131,7 @@ ai() {
   }
 
   # ── Model profiles ───────────────────────────────────────────────────
-  # Three models, and no others. Every model_id is the two-level <org>/<repo>
+  # Four models, and no others. Every model_id is the two-level <org>/<repo>
   # form: it is the directory this launcher symlinks under --model-dir, the id
   # opencode.json declares, and the id opencode sends. oMLX resolves it to the
   # directory LEAF (resolve_model_id strips everything before the first "/"), so
@@ -191,7 +193,10 @@ ai() {
   # fine-tune of Qwen3.6-27B by prism-ml: 8.44 GB resident — less than half of
   # --muse — so it leaves the most room for the hot cache, a summarizer capture
   # and the OS. It costs prefill: ~194 tok/s, so the door charge on a 12.8k
-  # prompt is 58.6 s against GLM's 21.8 s. Decode ~38 tok/s short, ~12.5 at 17-22k.
+  # prompt is 58.6 s against GLM's 21.8 s. Decode ~38 tok/s short; at 17-22k the
+  # figure recorded here was ~12.5 and DOES NOT REPRODUCE — an isolated probe read
+  # 25.0 at 20k and a real 1.7-hour suite read 18.8-20.4 end-to-end (a lower bound,
+  # since end-to-end includes prefill). Budget 19-25, and say which lane you mean.
   #
   # It scored 5/12 pass@1 but 8/12 with one repair turn — the best recovery rate
   # of the three, so it takes feedback well, which is exactly what this repo's
@@ -231,6 +236,69 @@ ai() {
   _model_muse() {
     model_id="mlx-community/Muse-Glimmer-30B-4bit"
     model_label="Muse Glimmer 30B 4-bit"
+  }
+
+  # Opt-in via --qwen. THIS FLAG NAMES A SLOT, NOT A MODEL: the newest Qwen fills
+  # it, and a later Qwen (a 3.9, say) REPLACES this model under the SAME flag. It
+  # does not get a flag of its own. This roster has moved a model under a flag
+  # twice already, and each move needed a rule it did not have.
+  #
+  # WHY THIS PROFILE EXISTS: it prices Bonsai's 2-bit ternary quant. Qwen3.8-27B
+  # is Bonsai's architecture at 4 bits — same qwen3_5 model_type, same 64 layers
+  # with 16 caching KV, same head_dim 256 and 4 KV heads (~64 KB/token), same
+  # 262,144 native window, same 2180 tensors, the same declared-but-EMPTY MTP head
+  # that oMLX detects and skips. The quantization and the base checkpoint are the
+  # only differences, so the pair is a controlled test with no confound. It is not
+  # a new niche on the roster.
+  #
+  # 15.34 GB resident (oMLX's `actual:`, the figure the other rows quote). Read as
+  # GiB it is 16.47 GB, 0.42 GB over the 16.05 GB of weights on disk — so never
+  # subtract 15.34 from a GB budget. Door charge 61.5/63.1 s on a ~12.8k prompt
+  # against Bonsai's 56.7/59.6 the same day; decode 20.4/21.0 tok/s short and
+  # 18.6 at 20k against 36.4/34.6 and 25.0/24.4. Same 2,048 cache block, warm
+  # restore 3.4 s, patience ceiling 21,127 tokens. THE QUANT GAP IS ALMOST PURELY
+  # DECODE: 2.03x the store buys 0.58x the decode rate for only ~7% more prefill,
+  # which is what bandwidth-bound decode and compute-bound prefill predict.
+  #
+  # THE RATIO IS WHAT CARRIES, NOT THE ABSOLUTE RATE. Both numbers here were taken
+  # in one harness on one day: Bonsai decodes 1.33x this model at 20k and 1.71x at
+  # a short prompt. The absolute agentic rate depends on the lane you read it on —
+  # oMLX logs end-to-end when not streaming and decode-only when streaming, so at
+  # 17.7k the same model reads 2.0 or 18.9 tok/s on that flag alone.
+  #
+  # It rides the VLM lane, as Bonsai and Muse do, so patch-omlx-vlm-tools.mjs
+  # covers it and matters to it — without the tool list its parameters lose their
+  # schemas. It needs no output-parser patch of ours: oMLX infers its own native
+  # qwen3_coder parser and read 78 tool calls over 26 turns with zero defects.
+  # 65,536 declared context, 69,632 rail, matching its twin so the two profiles
+  # differ in one variable.
+  #
+  # IT IS THE ONE MODEL ON THIS ROSTER THAT PINS A BEHAVIOUR: reasoning_effort at
+  # medium, written to model_settings.json by patch-omlx-mtp.mjs under both id
+  # spellings. Its template injects an instruction paragraph at xhigh and NOTHING
+  # at medium, so the pin removes an instruction rather than adding a cap. At its
+  # own xhigh default it spent the whole 8,192-token budget and answered nothing on
+  # 7 of 12 real coding runs; at medium, over 24 runs, it did so ZERO times and the
+  # suite ran 3x faster. Read the pin's reason in patch-omlx-mtp.mjs before
+  # touching it — it is the opposite result to GLM's reverted thinking pin.
+  #
+  # CAPABILITY, and every figure below runs WITH that pin. At short prompts it
+  # leads: 12/12 and 11/12 pass@1 over two arms against a same-day Bonsai's 7/12,
+  # 0 runaways in 24 runs, 1.81 min per solved task against 4.47. At ~17.6k — the
+  # length this roster ranks on, and the only one the default may move on — it does
+  # NOT separate: 15/18 against 11/18 on pass@1 and 18/18 against 13/18 on pass@<=2,
+  # two arms each, which is +2.0/+2.5 once scaled to the 9-run arm the rule was
+  # written for. Bonsai's own two arms moved 3 verdicts at that length, so that lead
+  # sits inside the incumbent's measured instability. THE DEFAULT DID NOT MOVE: the
+  # margin clause did not fire, capability tied, and the tie-break needs BOTH
+  # min/solved and resident footprint — this model wins the first (3.14 against
+  # 3.50) and loses the second (15.34 GB against 8.44).
+  #
+  # Do NOT read its 12/12 against the --muse block's 9/12 either. Different day,
+  # different build, no side-by-side arm. Only the same-day Bonsai arm compares.
+  _model_qwen() {
+    model_id="lmstudio-community/Qwen3.8-27B-MLX-4bit"
+    model_label="Qwen3.8 27B 4-bit"
   }
 
   local oc_provider="mlx"
@@ -347,6 +415,7 @@ ai() {
     printf "    ${c_cyan}        --bonsai${c_reset}      Use Ternary Bonsai 27B 2-bit ${c_dim}(the default, named)${c_reset}\n"
     printf "    ${c_cyan}        --muse${c_reset}        Use Muse Glimmer 30B 4-bit ${c_dim}(18.6 GB resident — the short-prompt one)${c_reset}\n"
     printf "    ${c_cyan}        --glm${c_reset}         Use GLM 4.7 Flash 6-bit ${c_dim}(22.9 GB resident — the fast one)${c_reset}\n"
+    printf "    ${c_cyan}        --qwen${c_reset}        Use Qwen3.8 27B 4-bit ${c_dim}(15.3 GB resident — the default's 4-bit twin)${c_reset}\n"
     printf "    ${c_cyan}-k,     --kill${c_reset}        Kill the oMLX server\n"
     printf "    ${c_cyan}-h,     --help${c_reset}        Show this help\n"
     echo ""
@@ -354,10 +423,17 @@ ai() {
     printf "    ${c_bold}ai${c_reset}           Ternary Bonsai 27B 2-bit   ${c_dim} 8.4 GB · door 58.6s · 38 tok/s · 5/12${c_reset}\n"
     printf "    ${c_bold}ai --muse${c_reset}    Muse Glimmer 30B 4-bit     ${c_dim}18.6 GB · door 64.5s · 26 tok/s · 9/12${c_reset}\n"
     printf "    ${c_bold}ai --glm${c_reset}     GLM 4.7 Flash 6-bit        ${c_dim}22.9 GB · door 21.8s · 68 tok/s · 6/12${c_reset}\n"
+    printf "    ${c_bold}ai --qwen${c_reset}    Qwen3.8 27B 4-bit          ${c_dim}15.3 GB · door 62.3s · 21 tok/s · 11/12${c_reset}\n"
     echo ""
-    printf "    ${c_dim}Last column is pass@1 over 12 real coding runs at SHORT prompts (W14).${c_reset}\n"
-    printf "    ${c_dim}At ~17.6k the spread is 7 / 9 / 6 and the models stop separating (W21),${c_reset}\n"
-    printf "    ${c_dim}so the default is the cheapest per solved task there and the smallest.${c_reset}\n"
+    printf "    ${c_dim}Last column is pass@1 over 12 real coding runs at SHORT prompts (W14),${c_reset}\n"
+    printf "    ${c_dim}and the tok/s column is short-prompt decode. At ~17.6k the spread is${c_reset}\n"
+    printf "    ${c_dim}7 / 8 / 6 and the models stop separating (W21), so the default is the${c_reset}\n"
+    printf "    ${c_dim}cheapest per solved task there and the smallest.${c_reset}\n"
+    printf "    ${c_dim}--qwen's 11/12 is measured WITH its reasoning_effort=medium pin, and${c_reset}\n"
+    printf "    ${c_dim}beside a same-day Bonsai that scored 7/12 rather than the 5/12 above.${c_reset}\n"
+    printf "    ${c_dim}Unpinned it scores 5/12, spending the whole output budget on 7 of 12.${c_reset}\n"
+    printf "    ${c_dim}At ~17.6k it does NOT separate from the default (15/18 against 11/18${c_reset}\n"
+    printf "    ${c_dim}over two arms each, inside the band), so the default did not move.${c_reset}\n"
     printf "    ${c_dim}Weights come from LM Studio's store; ai.sh never downloads a model.${c_reset}\n"
     echo ""
   }
@@ -373,6 +449,7 @@ ai() {
     _info "  ${c_bold}ai${c_reset}            Ternary Bonsai 27B 2-bit"
     _info "  ${c_bold}ai --muse${c_reset}     Muse Glimmer 30B 4-bit"
     _info "  ${c_bold}ai --glm${c_reset}      GLM 4.7 Flash 6-bit"
+    _info "  ${c_bold}ai --qwen${c_reset}     Qwen3.8 27B 4-bit"
   }
 
   # ── Ensure the selected model is on disk ─────────────────────────────
@@ -442,13 +519,34 @@ ai() {
   }
 
   # ── Prune the paged SSD KV cache to the cap ────────────────────────────
-  # oMLX's LRU eviction only tracks blocks in its *live* index; blocks orphaned
-  # by earlier runs or model/quant switches are never revisited, so the on-disk
-  # footprint drifts far past --paged-ssd-cache-max-size. Enforce the cap here by
-  # deleting oldest-first (mtime = LRU, matching oMLX's own intent) until under
-  # target. Only ever called from _start_server with the server down, so no live
-  # process holds these blocks; a block is content-addressed, so a later cache
-  # lookup for a deleted one is just a miss → recompute (the safe failure mode).
+  # A BACKSTOP, not the budget. oMLX enforces the budget itself, and across
+  # models: _scan_existing_files files a foreign model's blocks in
+  # _incompatible_index, _tracked_ssd_size() counts them, and
+  # _evict_tracked_until_size walks the LRU across BOTH indexes, so the oldest
+  # foreign block is the first to go (upstream 28fe5cb8 / #1915, 2026-06-19, in
+  # this build). Do NOT read "skipped_incompatible=N blocks" in the log as a
+  # stuck cache: W3 saw 136 blocks / 24.95 GB sit under the 25 GB cap, which is
+  # eviction having no reason to fire, and the next block written cleared it —
+  # up to _MAX_INLINE_UNLINKS_PER_SAVE (32) unlinks per save, ~9 GB.
+  #
+  # One orphan survives that, and it is why this function stays. Blocks whose
+  # omlx_cache_format_version falls outside _READABLE_CACHE_FORMAT_VERSIONS are
+  # skipped by _read_file_metadata, so they enter NO index, count toward NO
+  # budget, and are never evicted. The oMLX install is editable, so any pull can
+  # bump that version and strand the whole cache. Deleting oldest-first (mtime =
+  # LRU, matching oMLX's own intent) is deliberately blunt: reading the version
+  # set into this script would copy a constant that drifts, and a drifted copy
+  # deletes LIVE blocks — a worse failure than keeping dead ones.
+  #
+  # Only ever called from _start_server with the server down, so no live process
+  # holds these blocks; a block is content-addressed, so a later cache lookup for
+  # a deleted one is just a miss → recompute (the safe failure mode).
+  #
+  # It does NOT prune on a model switch, by W13's decision. A switch does not
+  # kill the outgoing model's blocks, it makes them dormant: they serve a warm
+  # restore at ~3.4 s against ~150 s cold when you switch back. With four
+  # profiles a switch is ordinary, and oMLX already evicts them first when the
+  # budget binds.
   _prune_cache() {
     local dir=$1 max_gb=$2
     [[ -d "$dir" && -n "$max_gb" && "$max_gb" -gt 0 ]] 2>/dev/null || return 0
@@ -456,7 +554,7 @@ ai() {
     local max_bytes=$(( max_gb * 1024 * 1024 * 1024 )) cur_bytes
     cur_bytes=$(( $(du -sk "$dir" 2>/dev/null | awk '{print $1+0}') * 1024 ))
     (( cur_bytes > max_bytes )) || return 0
-    _info "Pruning KV cache: $(awk -v b="$cur_bytes" 'BEGIN{printf "%.1f", b/1073741824}')GB on disk over ${max_gb}GB cap (oMLX LRU left orphans)"
+    _info "Pruning KV cache: $(awk -v b="$cur_bytes" 'BEGIN{printf "%.1f", b/1073741824}')GB on disk over ${max_gb}GB cap (blocks oMLX cannot index, likely a cache-format bump)"
     local removed=0 reclaimed=0 mtime size path
     while IFS=' ' read -r mtime size path; do
       (( cur_bytes > max_bytes )) || break
@@ -721,7 +819,7 @@ process.stdout.write(JSON.stringify(base));
   # is named "bonsai" below rather than tracked as the string "default": the GLM
   # fail-safe further down keys on the profile NAME, and a sentinel that moves
   # with the default would silently point it at the wrong model.
-  local profile=""              # "" (default) | "glm" | "bonsai" | "muse"
+  local profile=""              # "" (default) | "glm" | "bonsai" | "muse" | "qwen"
   local -a passthrough_args=()
 
   while [[ $# -gt 0 ]]; do
@@ -768,6 +866,18 @@ process.stdout.write(JSON.stringify(base));
         profile="muse"
         shift
         ;;
+      --qwen|-qwen)
+        # A SLOT, not a model: the newest Qwen answers to this flag, and a later
+        # one replaces the model under it rather than earning a flag of its own.
+        # See _model_qwen for which Qwen fills it today.
+        if [[ -n "$profile" && "$profile" != "qwen" ]]; then
+          _err "Conflicting model flags: --${profile} and $1"
+          _show_help
+          return 1
+        fi
+        profile="qwen"
+        shift
+        ;;
       -l|--lite)
         _retired_flag "$1" "Qwen 3.6 35B-A3B oQ6 +MTP"
         return 1
@@ -806,6 +916,7 @@ process.stdout.write(JSON.stringify(base));
   case "$profile" in
     glm)  _model_glm ;;
     muse) _model_muse ;;
+    qwen) _model_qwen ;;
     *)    _model_bonsai ;;   # "" (bare `ai`) and "bonsai" both land here
   esac
   _resolve_runtime
@@ -829,11 +940,26 @@ process.stdout.write(JSON.stringify(base));
   # Apply per-model oMLX settings that aren't server CLI flags. They live in
   # ~/.omlx/model_settings.json, which oMLX reads at model load — so a running
   # server must be restarted to pick up a change (the model-switch restart below
-  # handles the common case). The current roster pins NOTHING: all three models
-  # pass their serve check at their own defaults, and MTP stays off. The call
-  # stays because the mechanism is where any future pin lands, and because it
-  # re-asserts our settings over an oMLX admin-panel toggle. Idempotent merge: it
-  # only writes when a value differs, and never clobbers other models/keys.
+  # handles the common case). The roster pins ONE BEHAVIOUR, on ONE model:
+  # Qwen3.8's reasoning_effort at medium — see _model_qwen above for the 24-run
+  # measurement behind it. The other three pass their serve check at their own
+  # defaults and pin nothing, and MTP stays off unless ai.env opts in. What this
+  # also writes is one max_context_window RAIL per model, against clients that
+  # never read opencode.json at all. The mechanism is where any further pin
+  # lands, and it re-asserts our values over an oMLX admin-panel toggle.
+  # Idempotent merge: it only writes when a value differs, and never clobbers
+  # other models/keys.
+  #
+  # THE TWO MTP VARIABLES MUST BE MARKED FOR EXPORT HERE. ai.env is SOURCEd, not
+  # read under `set -a`, so a plain `AI_QWEN_MTP=1` in it is a shell variable and
+  # nothing more. Every other variable in that file is read by ai.sh ITSELF, where
+  # a shell variable is enough; these two are read by the node process below, which
+  # inherits only the ENVIRONMENT. Without these lines the documented opt-in is a
+  # silent no-op — the toggle reads as set, the settings file still says false, and
+  # the only symptom is a decode rate that never moves. `export` on an unset name
+  # marks the attribute without creating an empty variable, so this is safe when
+  # ai.env says nothing, and it lets ai.env use either spelling.
+  export AI_QWEN_MTP AI_QWEN_MTP_DEPTH
   local omlx_base_dir="${OMLX_BASE_DIR:-${HOME}/.omlx}"
   if command -v node >/dev/null 2>&1 && [[ -f "${ai_dir}/scripts/patch-omlx-mtp.mjs" ]]; then
     node "${ai_dir}/scripts/patch-omlx-mtp.mjs" "${omlx_base_dir}/model_settings.json" >/dev/null 2>&1
@@ -887,14 +1013,63 @@ process.stdout.write(JSON.stringify(base));
   # None here. That makes the dotted-name repair above DEAD CODE: it rewrites
   # `webfetch.webfetch` to `webfetch` only when it can prove the prefix is a
   # real tool, and with no tool list it can prove nothing. It also strips the
-  # schemas from parameter coercion. Muse Glimmer and Bonsai both ride this
-  # lane; GLM does not.
+  # schemas from parameter coercion. Muse Glimmer, Bonsai and Qwen3.8 all ride
+  # this lane; GLM does not. Qwen3.8 needs no parser patch of ours but still needs
+  # this one — W5 proved it live, by a string-typed parameter that stays "5"
+  # instead of arriving as the number 5.
   local vlm_tools_patch_ok=0
   if command -v node >/dev/null 2>&1 && [[ -f "${ai_dir}/scripts/patch-omlx-vlm-tools.mjs" ]]; then
     if node "${ai_dir}/scripts/patch-omlx-vlm-tools.mjs" "$omlx_src_dir" >/dev/null 2>&1; then
       vlm_tools_patch_ok=1
       omlx_build="${omlx_build}+vlmtools2"
     fi
+  fi
+
+  # Record which native Metal kernels this install can actually IMPORT. oMLX
+  # ships four — bonsai (2-bit decode qmv + a fused spec-decode verify),
+  # glm_moe_dsa, minimax_m3 and qwen35_prefill — and a plain `pip install -e`
+  # builds NONE of them. oMLX's own docstring says the affected model families
+  # then "silently fall back to much slower generic paths", and three of this
+  # roster's four models sit in those families. Build them with the Metal
+  # toolchain present (Xcode CLI tools) and NOT through a plain reinstall:
+  #
+  #   OMLX_WITH_CUSTOM_KERNEL=1 uv pip install -e "$OMLX_SRC_DIR" \
+  #     --no-deps --python "$OMLX_VENV/bin/python" --reinstall-package omlx
+  #
+  # --no-deps is load-bearing: the pyproject pins runtime deps by FLOOR, so a
+  # plain reinstall can drag mlx-vlm/transformers forward and take the parser
+  # patches above with it. The build itself takes ~27 s.
+  #
+  # Measured on this box 2026-08-17, cold prefill isolated with max_tokens=1 and
+  # a unique nonce per run (so cached_tokens=0), comparing arms at the SAME cache
+  # occupancy: 12.8k door charge 86.6 s -> 76.4 s (1.13x), 17.6k 136.3 s ->
+  # 111.3 s (1.22x). Decode does not move — 18.3 -> 19.1 tok/s, inside noise —
+  # which is expected, since three of the four are prefill kernels and bonsai's
+  # decode kernel does not apply to a 4-bit model. The GDN route stays at its
+  # default: OMLX_GDN_IMPL=chunked measured 2.7% SLOWER and is not set anywhere.
+  # Read those figures beside the drift the same run found: the SSD cache filling
+  # from 12 GB to its 25 GB cap cost 35% on the identical prefill with the
+  # kernels held constant — a LARGER lever than this one, and still unpriced.
+  #
+  # Why this belongs in the build id: a rebuild does not move the source
+  # checkout's git HEAD, so `<binary>@<rev>` is byte-identical either side of
+  # one. Without this suffix a server started on the unbuilt code looks current
+  # to the state-file check below and keeps serving the slow paths forever.
+  # The check asks the installed package what it can import rather than globbing
+  # for .so files, so a present-but-ABI-broken extension reads as absent — which
+  # is what it is. nanobind is pinned to mlx's exact version precisely because a
+  # mismatch makes every kernel reject mlx arrays at the type caster. It costs
+  # ~0.06 s: omlx.custom_kernels is a leaf package and imports no server code.
+  #
+  # Nothing is appended when no kernel is importable, so a box that never builds
+  # them produces the build line it always did and is not restarted for this.
+  if [[ -x "${omlx_venv}/bin/python" ]]; then
+    local kernel_py='from omlx.custom_kernels import native_kernel_status as s
+n = sorted(k for k, v in s().items() if v.get("available"))
+print("+kernels%d%s" % (len(n), "".join(x[0] for x in n)) if n else "")'
+    local kernel_tag
+    kernel_tag=$("${omlx_venv}/bin/python" -c "$kernel_py" 2>/dev/null)
+    omlx_build="${omlx_build}${kernel_tag}"
   fi
 
   # ── Server management ──────────────────────────────────────────────
@@ -1024,11 +1199,13 @@ process.stdout.write(JSON.stringify(base));
     _info "Tool calls may be rejected as unknown tools, or a turn may end with no answer at all ${c_dim}(re-anchor scripts/patch-omlx-muse-toolcall.mjs)${c_reset}"
   fi
 
-  # Keyed on the VLM lane, not on one model: Bonsai loses the same repair. GLM
-  # rides the batched lane and is unaffected, so it is not warned.
-  if (( ! vlm_tools_patch_ok )) && [[ "$model_id" == *Muse-Glimmer* || "$model_id" == *Ternary-Bonsai* ]]; then
+  # Keyed on the VLM lane, not on one model: Bonsai and Qwen3.8 lose the same
+  # delivery. GLM rides the batched lane and is unaffected, so it is not warned.
+  # Every test here is on the MODEL id, so the next move of the default costs no
+  # edit — and a new model on this lane must be added here by hand.
+  if (( ! vlm_tools_patch_ok )) && [[ "$model_id" == *Muse-Glimmer* || "$model_id" == *Ternary-Bonsai* || "$model_id" == *Qwen3.8-27B* ]]; then
     _warn "oMLX VLM tool-list patch did not apply — the upgrade moved the code"
-    _info "The output parser cannot see the tool list, so the dotted-name repair is inert ${c_dim}(re-anchor scripts/patch-omlx-vlm-tools.mjs)${c_reset}"
+    _info "The output parser cannot see the tool list, so tool parameters lose their schemas and Muse's dotted-name repair goes inert ${c_dim}(re-anchor scripts/patch-omlx-vlm-tools.mjs)${c_reset}"
   fi
 
   local glm_degraded_context=24576
